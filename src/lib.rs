@@ -1,4 +1,15 @@
 //! Interface to the system's I/O completion-based asynchronous API.
+//!
+//! This crate acts as a safe wrapper around the system's I/O completion-based
+//! asynchronous API, which is exposed on the following operating systems:
+//!
+//! - Linux 5.1+, through [`io_uring`]. The [`async-io`] crate is used to provide
+//!   thread-free waiting on I/O events.
+//! - Windows, through [`IOCP`]. On first usage, a thread is spawned that constantly
+//!   polls for new I/O events.
+//!
+//! Due to system limitations, this crate only supports `'static` buffers, pinned in
+//! place to prevent them from moving while the I/O operation is in flight.
 
 #![deny(rust_2018_idioms, future_incompatible)]
 
@@ -124,6 +135,11 @@ impl<'a, T> fmt::Debug for Operation<'a, T> {
 }
 
 impl<'a, T> Operation<'a, T> {
+    /// Get the key for this operation.
+    pub fn key(&self) -> u64 {
+        self.cancel.key
+    }
+
     /// Get a reference to the inner buffer.
     ///
     /// This is safe, since the fact that the `Operation` is not yet pinned indicates that
@@ -206,7 +222,9 @@ impl OperationBuilder {
         let ptr = buffer.ptr().unwrap();
         let len = buffer.len();
 
-        let op = unsafe { sys::Operation::read(source.as_raw(), ptr.as_ptr(), len, offset as _) };
+        let op = unsafe {
+            sys::Operation::read(source.as_raw(), ptr.as_ptr(), len, offset as _, self.key)
+        };
 
         Operation {
             operation: op,
@@ -228,7 +246,9 @@ impl OperationBuilder {
         let ptr = buffer.ptr().unwrap();
         let len = buffer.len();
 
-        let op = unsafe { sys::Operation::write(source.as_raw(), ptr.as_ptr(), len, offset as _) };
+        let op = unsafe {
+            sys::Operation::write(source.as_raw(), ptr.as_ptr(), len, offset as _, self.key)
+        };
 
         Operation {
             operation: op,
@@ -263,15 +283,24 @@ impl<'a> Drop for Canceller<'a> {
 }
 
 /// A completion-based asynchronous operation that has completed.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug)]
 pub struct Completion {
+    /// The key for this operation.
     key: u64,
+
+    /// The result of this operation.
+    result: Option<io::Result<isize>>,
 }
 
 impl Completion {
     /// Get the user data associated with the operation.
     pub fn key(&self) -> u64 {
         self.key
+    }
+
+    /// Get the result of the operation.
+    pub fn result(&mut self) -> io::Result<isize> {
+        self.result.take().expect("result already taken")
     }
 }
 
@@ -300,7 +329,7 @@ cfg_if::cfg_if! {
     if #[cfg(unix)] {
         use std::os::unix::io::{AsRawFd, RawFd};
 
-        type Raw = RawFd;
+        pub type Raw = RawFd;
 
         pub trait AsRaw : AsRawFd {
             fn as_raw(&self) -> Raw {
@@ -312,7 +341,7 @@ cfg_if::cfg_if! {
     } else if #[cfg(windows)] {
         use std::os::windows::io::{AsRawHandle, RawHandle};
 
-        type Raw = RawHandle;
+        pub type Raw = RawHandle;
 
         pub trait AsRaw : AsRawHandle {
             fn as_raw(&self) -> Raw {
@@ -329,6 +358,17 @@ cfg_if::cfg_if! {
         pub trait AsRaw {
             fn as_raw(&self) -> Raw;
         }
+    }
+}
+
+/// Type-erased `Operation`.
+trait ErasedOperation {
+    fn operation(self: Pin<&mut Self>) -> Pin<&mut sys::Operation>;
+}
+
+impl<'a, T> ErasedOperation for Operation<'a, T> {
+    fn operation(self: Pin<&mut Self>) -> Pin<&mut sys::Operation> {
+        self.project().operation
     }
 }
 

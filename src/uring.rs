@@ -168,7 +168,16 @@ impl Ring {
             // Poll with a zero timeout.
             let timeout = Timespec::new().sec(0).nsec(0);
             let args = SubmitArgs::new().timespec(&timeout);
-            self.instance.submitter().submit_with_args(1, &args)?;
+            if let Err(e) = self.instance.submitter().submit_with_args(1, &args) {
+                match e.raw_os_error() {
+                    Some(62) => {
+                        // The timer expired, this is intentional,
+                    }
+                    _ => {
+                        return Err(e);
+                    }
+                }
+            }
 
             // Acquire a lock on the completion queue.
             let _queue_guard = self.complete.lock().unwrap();
@@ -219,22 +228,28 @@ impl Events {
             .map(|entry| unsafe { &*(entry as *const _ as *const CompleteEntry) })
             .map(|entry| Completion {
                 key: entry.user_data(),
+                result: Some(match entry.result() {
+                    result if result < -1 => Err(io::Error::from_raw_os_error(-result)),
+                    result => Ok(result as isize),
+                }),
             })
     }
 }
 
 impl Operation {
-    pub(crate) unsafe fn read(fd: RawFd, buf: *mut u8, len: usize, offset: i64) -> Self {
+    pub(crate) unsafe fn read(fd: RawFd, buf: *mut u8, len: usize, offset: i64, key: u64) -> Self {
         opcode::Read::new(Fd(fd), buf, len as _)
             .offset(offset)
             .build()
+            .user_data(key)
             .into()
     }
 
-    pub(crate) unsafe fn write(fd: RawFd, buf: *mut u8, len: usize, offset: i64) -> Self {
+    pub(crate) unsafe fn write(fd: RawFd, buf: *mut u8, len: usize, offset: i64, key: u64) -> Self {
         opcode::Write::new(Fd(fd), buf, len as _)
             .offset(offset)
             .build()
+            .user_data(key)
             .into()
     }
 }
