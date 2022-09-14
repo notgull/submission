@@ -88,6 +88,10 @@ impl Ring {
         })
     }
 
+    pub(crate) fn events(&self) -> io::Result<Events> {
+        Ok(Events::new())
+    }
+
     pub(crate) fn register(&self, _fd: RawFd) -> io::Result<()> {
         // This does nothing for now; in the future, we may want to use the `IORING_REGISTER_FILES`
         // opcode to register the file descriptor with the ring.
@@ -131,7 +135,7 @@ impl Ring {
         Ok(())
     }
 
-    pub(crate) fn cancel(&self, key: u64) -> io::Result<()> {
+    pub(crate) fn cancel(&self, _op: Pin<&mut Operation>, key: u64) -> io::Result<()> {
         // Acquire a lock on the submission queue.
         let _guard = self.submit.lock().unwrap();
 
@@ -237,17 +241,17 @@ impl Events {
 }
 
 impl Operation {
-    pub(crate) unsafe fn read(fd: RawFd, buf: *mut u8, len: usize, offset: i64, key: u64) -> Self {
+    pub(crate) unsafe fn read(fd: RawFd, buf: *mut u8, len: usize, offset: u64, key: u64) -> Self {
         opcode::Read::new(Fd(fd), buf, len as _)
-            .offset(offset)
+            .offset(offset as _)
             .build()
             .user_data(key)
             .into()
     }
 
-    pub(crate) unsafe fn write(fd: RawFd, buf: *mut u8, len: usize, offset: i64, key: u64) -> Self {
+    pub(crate) unsafe fn write(fd: RawFd, buf: *mut u8, len: usize, offset: u64, key: u64) -> Self {
         opcode::Write::new(Fd(fd), buf, len as _)
-            .offset(offset)
+            .offset(offset as _)
             .build()
             .user_data(key)
             .into()

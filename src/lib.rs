@@ -25,6 +25,9 @@ cfg_if::cfg_if! {
     if #[cfg(target_os = "linux")] {
         mod uring;
         use uring as sys;
+    } else if #[cfg(windows)] {
+        mod iocp;
+        use iocp as sys;
     } else {
         mod unavailable;
         use unavailable as sys;
@@ -53,7 +56,7 @@ impl Ring {
     /// the necessary resources.
     pub fn new() -> io::Result<Self> {
         let inner = sys::Ring::new()?;
-        let events = Mutex::new(sys::Events::new());
+        let events = Mutex::new(inner.events()?);
 
         Ok(Self { inner, events })
     }
@@ -69,17 +72,28 @@ impl Ring {
     }
 
     /// Submits an operation to the completion interface.
-    pub fn submit<'a, B>(&'a self, operation: Pin<&mut Operation<'a, B>>) -> io::Result<()> {
-        let project = operation.project();
+    pub fn submit<'a, B: Buf>(&'a self, operation: Pin<&mut Operation<'a, B>>) -> io::Result<()> {
+        let mut project = operation.project();
+
         project.cancel.ring = Some(self);
 
+        // Create the operation and add it to our pin.
+        project.operation.set(Some(unsafe {
+            project
+                .params
+                .make_operation(&*project.buffer, project.cancel.key)
+        }));
+
         // SAFETY: Operation can only contain valid events.
-        unsafe { self.inner.submit(project.operation) }
+        unsafe { self.inner.submit(project.operation.as_pin_mut().unwrap()) }
     }
 
     /// Cancels an operation.
-    fn cancel(&self, key: u64) -> io::Result<()> {
-        self.inner.cancel(key)
+    fn cancel<B>(&self, op: Pin<&mut Operation<'_, B>>) -> io::Result<()> {
+        let project = op.project();
+
+        self.inner
+            .cancel(project.operation.as_pin_mut().unwrap(), project.cancel.key)
     }
 
     /// Wait for completion events.
@@ -101,30 +115,54 @@ impl Ring {
     }
 }
 
-pin_project_lite::pin_project! {
-    /// An operation to be submitted to the ring.
-    ///
-    /// This is a wrapper around the system-specific operation type as well as
-    /// the user buffer that may be associated with it.
-    pub struct Operation<'a, T> {
-        // The wrapper around the system-specific operation type.
-        //
-        // This is pinned; however, `sys::Operation` may be `Unpin`.
-        #[pin]
-        operation: sys::Operation,
+/// An operation to be submitted to the ring.
+///
+/// This is a wrapper around the system-specific operation type as well as
+/// the user buffer that may be associated with it.
+// Note: Neither pin_project nor pin_project_lite's semantics allow for what we
+// want to do with this, so we manually project.
+pub struct Operation<'a, T> {
+    // The wrapper around the system-specific operation type.
+    //
+    // This is pinned; however, `sys::Operation` may be `Unpin`. It is set once the
+    // operation is submitted to the ring.
+    operation: Option<sys::Operation>,
 
-        // The user buffer that may be associated with the operation.
-        //
-        // This is considered to be pinned.
-        #[pin]
-        buffer: T,
+    // Details on how to begin the operation.
+    params: OperationParams,
 
-        // Data that can be used to cancel this operation.
-        cancel: Canceller<'a>,
+    // The user buffer that may be associated with the operation.
+    //
+    // This is considered to be pinned.
+    buffer: T,
 
-        // Prevents `Operation` from being `Unpin`.
-        #[pin]
-        _pin: PhantomPinned,
+    // Data that can be used to cancel this operation.
+    cancel: Canceller<'a>,
+
+    // Prevents `Operation` from being `Unpin`.
+    _pin: PhantomPinned,
+}
+
+/// Pin-projection of `Operation`.
+///
+/// Neither `pin_project` nor `pin_project_lite`'s semantics allow for what we want to do with this,
+/// so we manually project.
+struct OperationProj<'r, 'a, T> {
+    operation: Pin<&'r mut Option<sys::Operation>>,
+    params: &'r mut OperationParams,
+    cancel: &'r mut Canceller<'a>,
+    buffer: Pin<&'r mut T>,
+}
+
+impl<'a, T> Drop for Operation<'a, T> {
+    fn drop(&mut self) {
+        // SAFETY: `self` is pinned but `ring` is not.
+        let ring = self.cancel.ring;
+
+        // If the operation was submitted, cancel it.
+        if let Some(ring) = ring {
+            let _ = ring.cancel(unsafe { Pin::new_unchecked(self) });
+        }
     }
 }
 
@@ -135,6 +173,24 @@ impl<'a, T> fmt::Debug for Operation<'a, T> {
 }
 
 impl<'a, T> Operation<'a, T> {
+    fn project<'proj>(self: Pin<&'proj mut Self>) -> OperationProj<'proj, 'a, T> {
+        unsafe {
+            let Self {
+                operation,
+                params,
+                buffer,
+                cancel,
+                ..
+            } = self.get_unchecked_mut();
+            OperationProj {
+                operation: Pin::new_unchecked(operation),
+                params,
+                cancel,
+                buffer: Pin::new_unchecked(buffer),
+            }
+        }
+    }
+
     /// Get the key for this operation.
     pub fn key(&self) -> u64 {
         self.cancel.key
@@ -156,14 +212,6 @@ impl<'a, T> Operation<'a, T> {
         &mut self.buffer
     }
 
-    /// Destroy this operation and return the inner buffer.
-    ///
-    /// This is safe, since the fact that the `Operation` is not yet pinned indicates that
-    /// the buffer is not yet in use.
-    pub fn into_buffer(self) -> T {
-        self.buffer
-    }
-
     /// "Unlock" an operation, allowing the buffer to be accessed.
     pub fn unlock(self: Pin<&mut Self>, complete: &Completion) -> Option<&mut Self> {
         if self.cancel.key == complete.key() {
@@ -176,10 +224,10 @@ impl<'a, T> Operation<'a, T> {
     }
 
     /// Cancels this operation and returns the inner buffer.
-    pub fn cancel(self: Pin<&mut Self>) -> io::Result<&mut Self> {
+    pub fn cancel(mut self: Pin<&mut Self>) -> io::Result<&mut Self> {
         // If we have a ring, cancel ourselves on it.
         if let Some(ring) = self.cancel.ring {
-            ring.cancel(self.cancel.key)?;
+            ring.cancel(self.as_mut())?;
 
             // Now we can unlock ourselves.
             let this = unsafe { self.get_unchecked_mut() };
@@ -217,17 +265,13 @@ impl OperationBuilder {
         buffer: T,
         offset: u64,
     ) -> Operation<'a, T> {
-        // Create a new operation.
-        // SAFETY: The 'BufMut' trait certifies its ability to be used here.
-        let ptr = buffer.ptr().unwrap();
-        let len = buffer.len();
-
-        let op = unsafe {
-            sys::Operation::read(source.as_raw(), ptr.as_ptr(), len, offset as _, self.key)
-        };
-
         Operation {
-            operation: op,
+            operation: None,
+            params: OperationParams::Read {
+                fd: source.as_raw(),
+                len: buffer.len(),
+                offset,
+            },
             buffer,
             cancel: Canceller::new(self.key),
             _pin: PhantomPinned,
@@ -241,20 +285,40 @@ impl OperationBuilder {
         buffer: T,
         offset: u64,
     ) -> Operation<'a, T> {
-        // Create a new operation.
-        // SAFETY: The 'Buf' trait certifies its ability to be used here.
-        let ptr = buffer.ptr().unwrap();
-        let len = buffer.len();
-
-        let op = unsafe {
-            sys::Operation::write(source.as_raw(), ptr.as_ptr(), len, offset as _, self.key)
-        };
-
         Operation {
-            operation: op,
+            operation: None,
+            params: OperationParams::Write {
+                fd: source.as_raw(),
+                len: buffer.len(),
+                offset,
+            },
             buffer,
             cancel: Canceller::new(self.key),
             _pin: PhantomPinned,
+        }
+    }
+}
+
+/// Parameters used to build an `sys::Operation`.
+enum OperationParams {
+    /// Read the specified number of bytes from the specified file descriptor.
+    Read { fd: Raw, len: usize, offset: u64 },
+
+    /// Write the specified number of bytes to the specified file descriptor.
+    Write { fd: Raw, len: usize, offset: u64 },
+}
+
+impl OperationParams {
+    unsafe fn make_operation<B: Buf>(&self, buffer: &B, key: u64) -> sys::Operation {
+        match self {
+            Self::Read { fd, len, offset } => {
+                let ptr = buffer.ptr().unwrap();
+                sys::Operation::read(*fd, ptr.as_ptr(), *len, *offset, key)
+            }
+            Self::Write { fd, len, offset } => {
+                let ptr = buffer.ptr().unwrap();
+                sys::Operation::write(*fd, ptr.as_ptr(), *len, *offset, key)
+            }
         }
     }
 }
@@ -270,15 +334,6 @@ struct Canceller<'a> {
 impl<'a> Canceller<'a> {
     pub fn new(key: u64) -> Self {
         Self { key, ring: None }
-    }
-}
-
-impl<'a> Drop for Canceller<'a> {
-    fn drop(&mut self) {
-        // If we have a ring, cancel ourselves on it.
-        if let Some(ring) = self.ring {
-            ring.cancel(self.key).ok();
-        }
     }
 }
 
@@ -358,17 +413,6 @@ cfg_if::cfg_if! {
         pub trait AsRaw {
             fn as_raw(&self) -> Raw;
         }
-    }
-}
-
-/// Type-erased `Operation`.
-trait ErasedOperation {
-    fn operation(self: Pin<&mut Self>) -> Pin<&mut sys::Operation>;
-}
-
-impl<'a, T> ErasedOperation for Operation<'a, T> {
-    fn operation(self: Pin<&mut Self>) -> Pin<&mut sys::Operation> {
-        self.project().operation
     }
 }
 

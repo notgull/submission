@@ -27,6 +27,10 @@ impl Ring {
         ))
     }
 
+    pub(crate) fn events(&self) -> io::Result<Events> {
+        match self.0 {}
+    }
+
     pub(crate) fn register(&self, _source: Raw) -> io::Result<()> {
         match self.0 {}
     }
