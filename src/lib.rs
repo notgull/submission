@@ -10,6 +10,10 @@
 //!
 //! Due to system limitations, this crate only supports `'static` buffers, pinned in
 //! place to prevent them from moving while the I/O operation is in flight.
+//! 
+//! # Usage
+//! 
+//! Usage occurs through the [`Ring`] type, which represents the completion instance.
 
 #![deny(rust_2018_idioms, future_incompatible)]
 
