@@ -24,8 +24,6 @@ use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::Mutex;
 
-use __private::Sealed;
-
 cfg_if::cfg_if! {
     if #[cfg(target_os = "linux")] {
         mod uring;
@@ -378,15 +376,125 @@ impl Completion {
 ///
 /// # Safety
 ///
-/// This trait is not meant to be implemented outside of this crate.
-pub unsafe trait AsyncParameter: Sealed {}
+/// This safety requirements for this trait depend on the downstream traits implemented by the
+/// implementor.
+#[allow(clippy::len_without_is_empty)]
+pub unsafe trait AsyncParameter {
+    /// The pointer into the buffer, if any.
+    fn ptr(&self) -> Option<NonNull<u8>>;
 
-unsafe impl<const N: usize> AsyncParameter for [u8; N] {}
-unsafe impl<const N: usize> AsyncParameter for &'static [u8; N] {}
-unsafe impl AsyncParameter for &'static [u8] {}
-unsafe impl AsyncParameter for &'static mut [u8] {}
-unsafe impl AsyncParameter for Vec<u8> {}
-unsafe impl AsyncParameter for Box<[u8]> {}
+    /// The pointer into the second buffer, if any.
+    fn ptr2(&self) -> Option<NonNull<u8>>;
+
+    /// The length of the first buffer, if any.
+    fn len(&self) -> usize;
+
+    /// The length of the second buffer, if any.
+    fn len2(&self) -> usize;
+}
+
+unsafe impl<const N: usize> AsyncParameter for [u8; N] {
+    fn ptr(&self) -> Option<NonNull<u8>> {
+        self.first().map(NonNull::from)
+    }
+
+    fn ptr2(&self) -> Option<NonNull<u8>> {
+        None
+    }
+
+    fn len(&self) -> usize {
+        N
+    }
+
+    fn len2(&self) -> usize {
+        0
+    }
+}
+unsafe impl<const N: usize> AsyncParameter for &'static [u8; N] {
+    fn ptr(&self) -> Option<NonNull<u8>> {
+        self.first().map(NonNull::from)
+    }
+
+    fn ptr2(&self) -> Option<NonNull<u8>> {
+        None
+    }
+
+    fn len(&self) -> usize {
+        N
+    }
+
+    fn len2(&self) -> usize {
+        0
+    }
+}
+unsafe impl AsyncParameter for &'static [u8] {
+    fn ptr(&self) -> Option<NonNull<u8>> {
+        self.first().map(NonNull::from)
+    }
+
+    fn ptr2(&self) -> Option<NonNull<u8>> {
+        None
+    }
+
+    fn len(&self) -> usize {
+        <[u8]>::len(self)
+    }
+
+    fn len2(&self) -> usize {
+        0
+    }
+}
+unsafe impl AsyncParameter for &'static mut [u8] {
+    fn ptr(&self) -> Option<NonNull<u8>> {
+        self.first().map(NonNull::from)
+    }
+
+    fn ptr2(&self) -> Option<NonNull<u8>> {
+        None
+    }
+
+    fn len(&self) -> usize {
+        <[u8]>::len(self)
+    }
+
+    fn len2(&self) -> usize {
+        0
+    }
+}
+unsafe impl AsyncParameter for Vec<u8> {
+    fn ptr(&self) -> Option<NonNull<u8>> {
+        self.first().map(NonNull::from)
+    }
+
+    fn ptr2(&self) -> Option<NonNull<u8>> {
+        None
+    }
+
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+
+    fn len2(&self) -> usize {
+        0
+    }
+}
+unsafe impl AsyncParameter for Box<[u8]> {
+    fn ptr(&self) -> Option<NonNull<u8>> {
+        self.first().map(NonNull::from)
+    }
+
+    fn ptr2(&self) -> Option<NonNull<u8>> {
+        None
+    }
+
+    fn len(&self) -> usize {
+        <[u8]>::len(self)
+    }
+
+    fn len2(&self) -> usize {
+        0
+    }
+}
 
 /// A buffer that may be passed to a system-specific operation.
 ///
@@ -395,7 +503,11 @@ unsafe impl AsyncParameter for Box<[u8]> {}
 ///
 /// # Safety
 ///
-/// This trait is not meant to be implemented outside of this crate.
+/// - `ptr()` must be a pointer to the first element of the buffer, or
+///   `None` if the buffer is empty.
+/// - `len()` must be the number of elements the buffer is valid for.
+/// - `ptr2()` must be `None`.
+/// - `len2()` must be `0`.
 pub unsafe trait Buf: AsyncParameter {}
 
 unsafe impl<const N: usize> Buf for [u8; N] {}
@@ -409,7 +521,7 @@ unsafe impl Buf for Box<[u8]> {}
 ///
 /// # Safety
 ///
-/// This trait is not meant to be implemented outside of this crate.
+/// Safe as [`Buf`], but `ptr()` must also be valid for mutable writes.
 pub unsafe trait BufMut: Buf {}
 
 unsafe impl<const N: usize> BufMut for [u8; N] {}
@@ -449,152 +561,6 @@ cfg_if::cfg_if! {
 
         pub trait AsRaw {
             fn as_raw(&self) -> Raw;
-        }
-    }
-}
-
-mod __private {
-    use std::ptr::NonNull;
-
-    /// The underlying methods for `AsyncParameter`.
-    #[doc(hidden)]
-    pub trait Sealed {
-        /// The pointer into the buffer, if any.
-        fn ptr(&self) -> Option<NonNull<u8>>;
-
-        /// The pointer into the second buffer, if any.
-        fn ptr2(&self) -> Option<NonNull<u8>>;
-
-        /// The length of the first buffer, if any.
-        fn len(&self) -> usize;
-
-        /// The length of the second buffer, if any.
-        fn len2(&self) -> usize;
-    }
-
-    impl<const N: usize> Sealed for [u8; N] {
-        fn ptr(&self) -> Option<NonNull<u8>> {
-            self.first().map(NonNull::from)
-        }
-
-        fn ptr2(&self) -> Option<NonNull<u8>> {
-            None
-        }
-
-        fn len(&self) -> usize {
-            N
-        }
-
-        fn len2(&self) -> usize {
-            0
-        }
-    }
-
-    impl<const N: usize> Sealed for &'static [u8; N] {
-        fn ptr(&self) -> Option<NonNull<u8>> {
-            self.first().map(NonNull::from)
-        }
-
-        fn ptr2(&self) -> Option<NonNull<u8>> {
-            None
-        }
-
-        fn len(&self) -> usize {
-            N
-        }
-
-        fn len2(&self) -> usize {
-            0
-        }
-    }
-
-    impl Sealed for &'static [u8] {
-        fn ptr(&self) -> Option<NonNull<u8>> {
-            self.first().map(NonNull::from)
-        }
-
-        fn ptr2(&self) -> Option<NonNull<u8>> {
-            None
-        }
-
-        fn len(&self) -> usize {
-            <[u8]>::len(self)
-        }
-
-        fn len2(&self) -> usize {
-            0
-        }
-    }
-
-    impl Sealed for &'static mut [u8] {
-        fn ptr(&self) -> Option<NonNull<u8>> {
-            self.first().map(NonNull::from)
-        }
-
-        fn ptr2(&self) -> Option<NonNull<u8>> {
-            None
-        }
-
-        fn len(&self) -> usize {
-            <[u8]>::len(self)
-        }
-
-        fn len2(&self) -> usize {
-            0
-        }
-    }
-
-    impl Sealed for Vec<u8> {
-        fn ptr(&self) -> Option<NonNull<u8>> {
-            self.first().map(NonNull::from)
-        }
-
-        fn ptr2(&self) -> Option<NonNull<u8>> {
-            None
-        }
-
-        fn len(&self) -> usize {
-            Vec::len(self)
-        }
-
-        fn len2(&self) -> usize {
-            0
-        }
-    }
-
-    impl Sealed for Box<[u8]> {
-        fn ptr(&self) -> Option<NonNull<u8>> {
-            self.first().map(NonNull::from)
-        }
-
-        fn ptr2(&self) -> Option<NonNull<u8>> {
-            None
-        }
-
-        fn len(&self) -> usize {
-            <[u8]>::len(self)
-        }
-
-        fn len2(&self) -> usize {
-            0
-        }
-    }
-
-    impl Sealed for &'static str {
-        fn ptr(&self) -> Option<NonNull<u8>> {
-            self.as_bytes().first().map(NonNull::from)
-        }
-
-        fn ptr2(&self) -> Option<NonNull<u8>> {
-            None
-        }
-
-        fn len(&self) -> usize {
-            <str>::len(self)
-        }
-
-        fn len2(&self) -> usize {
-            0
         }
     }
 }
