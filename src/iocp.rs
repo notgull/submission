@@ -73,6 +73,8 @@ impl Ring {
     }
 
     pub(crate) unsafe fn submit(&self, operation: Pin<&mut Operation>) -> io::Result<()> {
+        // Run with the event loop.
+        let project = operation.project();
         todo!()
     }
 

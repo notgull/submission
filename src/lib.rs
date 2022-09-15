@@ -21,6 +21,7 @@ use std::fmt;
 use std::io;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
+use std::ptr::NonNull;
 use std::sync::Mutex;
 
 use __private::Sealed;
@@ -81,7 +82,7 @@ impl Ring {
     ///
     /// Between the time that this function is called and the time that the
     /// operation completes, the buffer must not be moved or forgotten.
-    pub unsafe fn submit<'a, B: Buf>(
+    pub unsafe fn submit<'a, B: AsyncParameter>(
         &'a self,
         operation: Pin<&mut Operation<'a, B>>,
     ) -> io::Result<()> {
@@ -321,14 +322,14 @@ enum OperationParams {
 }
 
 impl OperationParams {
-    unsafe fn make_operation<B: Buf>(&self, buffer: &B, key: u64) -> sys::Operation {
+    unsafe fn make_operation<B: AsyncParameter>(&self, buffer: &B, key: u64) -> sys::Operation {
         match self {
             Self::Read { fd, len, offset } => {
-                let ptr = buffer.ptr().unwrap();
+                let ptr = buffer.ptr().unwrap_or(NonNull::dangling());
                 sys::Operation::read(*fd, ptr.as_ptr(), *len, *offset, key)
             }
             Self::Write { fd, len, offset } => {
-                let ptr = buffer.ptr().unwrap();
+                let ptr = buffer.ptr().unwrap_or(NonNull::dangling());
                 sys::Operation::write(*fd, ptr.as_ptr(), *len, *offset, key)
             }
         }
@@ -371,6 +372,22 @@ impl Completion {
     }
 }
 
+/// An object that can be passed into an asynchronous operation.
+///
+/// This is a base trait that is implemented by `Buf`, `BufMut` and others.
+///
+/// # Safety
+///
+/// This trait is not meant to be implemented outside of this crate.
+pub unsafe trait AsyncParameter: Sealed {}
+
+unsafe impl<const N: usize> AsyncParameter for [u8; N] {}
+unsafe impl<const N: usize> AsyncParameter for &'static [u8; N] {}
+unsafe impl AsyncParameter for &'static [u8] {}
+unsafe impl AsyncParameter for &'static mut [u8] {}
+unsafe impl AsyncParameter for Vec<u8> {}
+unsafe impl AsyncParameter for Box<[u8]> {}
+
 /// A buffer that may be passed to a system-specific operation.
 ///
 /// This is implied to be some kind of memory buffer that may be used by the
@@ -379,9 +396,14 @@ impl Completion {
 /// # Safety
 ///
 /// This trait is not meant to be implemented outside of this crate.
-pub unsafe trait Buf: Sealed {}
+pub unsafe trait Buf: AsyncParameter {}
 
-unsafe impl<T: 'static + AsRef<[u8]>> Buf for T {}
+unsafe impl<const N: usize> Buf for [u8; N] {}
+unsafe impl<const N: usize> Buf for &'static [u8; N] {}
+unsafe impl Buf for &'static [u8] {}
+unsafe impl Buf for &'static mut [u8] {}
+unsafe impl Buf for Vec<u8> {}
+unsafe impl Buf for Box<[u8]> {}
 
 /// A `Buf` whose data can also be mutably accessed.
 ///
@@ -390,7 +412,10 @@ unsafe impl<T: 'static + AsRef<[u8]>> Buf for T {}
 /// This trait is not meant to be implemented outside of this crate.
 pub unsafe trait BufMut: Buf {}
 
-unsafe impl<T: Buf + AsMut<[u8]>> BufMut for T {}
+unsafe impl<const N: usize> BufMut for [u8; N] {}
+unsafe impl BufMut for &'static mut [u8] {}
+unsafe impl BufMut for Vec<u8> {}
+unsafe impl BufMut for Box<[u8]> {}
 
 cfg_if::cfg_if! {
     if #[cfg(unix)] {
@@ -431,23 +456,145 @@ cfg_if::cfg_if! {
 mod __private {
     use std::ptr::NonNull;
 
+    /// The underlying methods for `AsyncParameter`.
     #[doc(hidden)]
     pub trait Sealed {
         /// The pointer into the buffer, if any.
         fn ptr(&self) -> Option<NonNull<u8>>;
 
-        /// The length of the buffer, if any.
+        /// The pointer into the second buffer, if any.
+        fn ptr2(&self) -> Option<NonNull<u8>>;
+
+        /// The length of the first buffer, if any.
         fn len(&self) -> usize;
+
+        /// The length of the second buffer, if any.
+        fn len2(&self) -> usize;
     }
 
-    impl<T: 'static + AsRef<[u8]>> Sealed for T {
+    impl<const N: usize> Sealed for [u8; N] {
         fn ptr(&self) -> Option<NonNull<u8>> {
-            let slice = self.as_ref();
-            NonNull::new(slice.as_ptr() as *mut u8)
+            self.first().map(NonNull::from)
+        }
+
+        fn ptr2(&self) -> Option<NonNull<u8>> {
+            None
         }
 
         fn len(&self) -> usize {
-            self.as_ref().len()
+            N
+        }
+
+        fn len2(&self) -> usize {
+            0
+        }
+    }
+
+    impl<const N: usize> Sealed for &'static [u8; N] {
+        fn ptr(&self) -> Option<NonNull<u8>> {
+            self.first().map(NonNull::from)
+        }
+
+        fn ptr2(&self) -> Option<NonNull<u8>> {
+            None
+        }
+
+        fn len(&self) -> usize {
+            N
+        }
+
+        fn len2(&self) -> usize {
+            0
+        }
+    }
+
+    impl Sealed for &'static [u8] {
+        fn ptr(&self) -> Option<NonNull<u8>> {
+            self.first().map(NonNull::from)
+        }
+
+        fn ptr2(&self) -> Option<NonNull<u8>> {
+            None
+        }
+
+        fn len(&self) -> usize {
+            <[u8]>::len(self)
+        }
+
+        fn len2(&self) -> usize {
+            0
+        }
+    }
+
+    impl Sealed for &'static mut [u8] {
+        fn ptr(&self) -> Option<NonNull<u8>> {
+            self.first().map(NonNull::from)
+        }
+
+        fn ptr2(&self) -> Option<NonNull<u8>> {
+            None
+        }
+
+        fn len(&self) -> usize {
+            <[u8]>::len(self)
+        }
+
+        fn len2(&self) -> usize {
+            0
+        }
+    }
+
+    impl Sealed for Vec<u8> {
+        fn ptr(&self) -> Option<NonNull<u8>> {
+            self.first().map(NonNull::from)
+        }
+
+        fn ptr2(&self) -> Option<NonNull<u8>> {
+            None
+        }
+
+        fn len(&self) -> usize {
+            Vec::len(self)
+        }
+
+        fn len2(&self) -> usize {
+            0
+        }
+    }
+
+    impl Sealed for Box<[u8]> {
+        fn ptr(&self) -> Option<NonNull<u8>> {
+            self.first().map(NonNull::from)
+        }
+
+        fn ptr2(&self) -> Option<NonNull<u8>> {
+            None
+        }
+
+        fn len(&self) -> usize {
+            <[u8]>::len(self)
+        }
+
+        fn len2(&self) -> usize {
+            0
+        }
+    }
+
+    impl Sealed for &'static str {
+        fn ptr(&self) -> Option<NonNull<u8>> {
+            self.as_bytes().first().map(NonNull::from)
+        }
+
+        fn ptr2(&self) -> Option<NonNull<u8>> {
+            None
+        }
+
+        fn len(&self) -> usize {
+            <str>::len(self)
+        }
+
+        fn len2(&self) -> usize {
+            0
         }
     }
 }
