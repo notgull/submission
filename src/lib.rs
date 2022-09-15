@@ -22,7 +22,8 @@ use std::io;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::ptr::NonNull;
-use std::sync::Mutex;
+
+use async_lock::Mutex;
 
 cfg_if::cfg_if! {
     if #[cfg(target_os = "linux")] {
@@ -108,10 +109,9 @@ impl Ring {
     }
 
     /// Wait for completion events.
-    #[allow(clippy::await_holding_lock)]
     pub async fn wait(&self, events: &mut Vec<Completion>) -> io::Result<usize> {
         // Lock the completion queue.
-        if let Ok(mut lock) = self.events.try_lock() {
+        if let Some(mut lock) = self.events.try_lock() {
             // Wait for events with the completion interface.
             let amt = self.inner.wait(&mut lock).await?;
 

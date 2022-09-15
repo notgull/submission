@@ -2,8 +2,14 @@
 name = "submission"
 version = "0.1.0"
 edition = "2018"
+authors = ["John Nunley <jtnunley01@gmail.com>"]
+description = "Portable API for completion-based submission of tasks"
+repository = "https://github.com/notgull/async-filelike"
+homepage = "https://github.com/notgull/async-filelike#readme"
+keywords = ["io_uring", "async", "completion", "iocp"]
 
 [dependencies]
+async-lock = "2.5.0"
 cfg-if = "1"
 futures-lite = "1"
 log = "0.4"

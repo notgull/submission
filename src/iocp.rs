@@ -22,13 +22,20 @@ const SHUTDOWN_KEY: u32 = std::u32::MAX - 1;
 pub(crate) struct Ring {
     /// The raw handle to the IO completion port.
     ///
-    /// Logically, this is owned by `EventLoop`.
+    /// Logically, this is owned by `EventLoop`, so we don't drop it.
     port: ManuallyDrop<CompletionPort>,
 
     /// Event loop governing events.
+    /// 
+    /// We keep this running in the `blocking` thread pool. Logically it
+    /// is an iterator so that it will keep running and accumulating events
+    /// until it has too many, in which case the thread is freed up for
+    /// other work.
     event_loop: Unblock<EventLoop>,
 
     /// Event notifications for fixed events.
+    /// 
+    /// These are pinned to the heap.
     notifications: Pin<Box<Notifications>>,
 }
 
