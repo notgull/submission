@@ -28,4 +28,9 @@ pin-project-lite = "0.2.9"
 [dev-dependencies]
 async-io = "1"
 blocking = "1"
+criterion = "0.4.0"
 pin-utils = "0.1.0"
+
+[[bench]]
+name = "submit"
+harness = false
