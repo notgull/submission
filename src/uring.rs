@@ -107,6 +107,8 @@ impl Ring {
     }
 
     pub(crate) unsafe fn submit(&self, mut operation: Pin<&mut Operation>) -> io::Result<()> {
+        log::trace!("submission: submitting operation");
+
         // Get the submission entry.
         let s_entry = operation.submit.take().ok_or_else(|| {
             io::Error::new(io::ErrorKind::Other, "operation has already been submitted")
@@ -191,6 +193,7 @@ impl Ring {
             let mut queue = unsafe { self.instance.completion_shared() };
             if queue.is_empty() {
                 // The queue is empty. Wait for completion or a new submission.
+                log::trace!("submission: waiting for new events");
                 drop(_queue_guard);
                 let mut buffer = [0; 8];
                 (&self.new_events).read(&mut buffer).await?;
@@ -198,6 +201,7 @@ impl Ring {
                 // We are no longer notified.
                 self.notified.store(false, SeqCst);
             } else {
+                log::trace!("submission: found {} events", queue.len());
                 // The queue is not empty, begin emptying out events.
                 let filled = queue.fill(&mut *events.buffer);
                 let len = filled.len();
