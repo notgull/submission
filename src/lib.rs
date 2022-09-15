@@ -10,9 +10,9 @@
 //!
 //! Due to system limitations, this crate only supports `'static` buffers, pinned in
 //! place to prevent them from moving while the I/O operation is in flight.
-//! 
+//!
 //! # Usage
-//! 
+//!
 //! Usage occurs through the [`Ring`] type, which represents the completion instance.
 
 #![deny(rust_2018_idioms, future_incompatible)]
@@ -76,7 +76,15 @@ impl Ring {
     }
 
     /// Submits an operation to the completion interface.
-    pub fn submit<'a, B: Buf>(&'a self, operation: Pin<&mut Operation<'a, B>>) -> io::Result<()> {
+    ///
+    /// # Safety
+    ///
+    /// Between the time that this function is called and the time that the
+    /// operation completes, the buffer must not be moved or forgotten.
+    pub unsafe fn submit<'a, B: Buf>(
+        &'a self,
+        operation: Pin<&mut Operation<'a, B>>,
+    ) -> io::Result<()> {
         let mut project = operation.project();
 
         project.cancel.ring = Some(self);

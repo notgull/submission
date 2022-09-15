@@ -17,7 +17,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Submit the operation to the ring.
         pin_utils::pin_mut!(write_op);
-        ring.submit(write_op.as_mut())?;
+        unsafe {
+            ring.submit(write_op.as_mut())?;
+        }
 
         // Wait for complete events.
         let mut completion = 'poll: loop {
@@ -43,7 +45,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Submit the operation to the ring.
         pin_utils::pin_mut!(read_op);
-        ring.submit(read_op.as_mut())?;
+        unsafe {
+            ring.submit(read_op.as_mut())?;
+        }
 
         // Wait for complete events.
         let mut completion = 'poll: loop {
