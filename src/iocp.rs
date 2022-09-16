@@ -26,7 +26,7 @@ pub(crate) struct Ring {
     port: ManuallyDrop<CompletionPort>,
 
     /// Event loop governing events.
-    /// 
+    ///
     /// We keep this running in the `blocking` thread pool. Logically it
     /// is an iterator so that it will keep running and accumulating events
     /// until it has too many, in which case the thread is freed up for
@@ -34,7 +34,7 @@ pub(crate) struct Ring {
     event_loop: Unblock<EventLoop>,
 
     /// Event notifications for fixed events.
-    /// 
+    ///
     /// These are pinned to the heap.
     notifications: Pin<Box<Notifications>>,
 }

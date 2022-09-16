@@ -178,7 +178,7 @@ impl Ring {
 
                     // We are no longer notified.
                     self.notified.store(false, SeqCst);
-                },
+                }
                 len => return Ok(len),
             }
         }
@@ -187,38 +187,38 @@ impl Ring {
     /// Inner function to poll for events.
     fn poll_for_events(&self, events: &mut Events) -> io::Result<usize> {
         // See if there are any new events.
-            // Poll with a zero timeout.
-            let timeout = Timespec::new().sec(0).nsec(0);
-            let args = SubmitArgs::new().timespec(&timeout);
-            if let Err(e) = self.instance.submitter().submit_with_args(1, &args) {
-                match e.raw_os_error() {
-                    Some(62) => {
-                        // The timer expired, this is intentional,
-                    }
-                    _ => {
-                        return Err(e);
-                    }
+        // Poll with a zero timeout.
+        let timeout = Timespec::new().sec(0).nsec(0);
+        let args = SubmitArgs::new().timespec(&timeout);
+        if let Err(e) = self.instance.submitter().submit_with_args(1, &args) {
+            match e.raw_os_error() {
+                Some(62) => {
+                    // The timer expired, this is intentional,
+                }
+                _ => {
+                    return Err(e);
                 }
             }
+        }
 
-            // Acquire a lock on the completion queue.
-            let _queue_guard = self.complete.lock().unwrap();
+        // Acquire a lock on the completion queue.
+        let _queue_guard = self.complete.lock().unwrap();
 
-            // Poll for completions.
-            // SAFETY: We have exclusive access to the completion queue.
-            let mut queue = unsafe { self.instance.completion_shared() };
-            if queue.is_empty() {
-                // The queue is empty. Wait for completion or a new submission.
-                log::trace!("submission: waiting for new events");
-                return Ok(0);
-            } else {
-                log::trace!("submission: found {} events", queue.len());
-                // The queue is not empty, begin emptying out events.
-                let filled = queue.fill(&mut *events.buffer);
-                let len = filled.len();
-                events.count = len;
-                return Ok(len);
-            }
+        // Poll for completions.
+        // SAFETY: We have exclusive access to the completion queue.
+        let mut queue = unsafe { self.instance.completion_shared() };
+        if queue.is_empty() {
+            // The queue is empty. Wait for completion or a new submission.
+            log::trace!("submission: waiting for new events");
+            Ok(0)
+        } else {
+            log::trace!("submission: found {} events", queue.len());
+            // The queue is not empty, begin emptying out events.
+            let filled = queue.fill(&mut *events.buffer);
+            let len = filled.len();
+            events.count = len;
+            Ok(len)
+        }
     }
 
     fn notify(&self) -> io::Result<()> {

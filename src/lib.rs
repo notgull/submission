@@ -14,14 +14,25 @@
 //! # Usage
 //!
 //! Usage occurs through the [`Ring`] type, which represents the completion instance.
+//!
+//! [`io_uring`]: https://kernel.dk/io_uring.pdf
+//! [`IOCP`]: https://docs.microsoft.com/en-us/windows/win32/fileio/i-o-completion-ports
+//! [`async-io`]: https://crates.io/crates/async-io
 
 #![deny(rust_2018_idioms, future_incompatible)]
 
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
 use std::marker::PhantomPinned;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::ptr::NonNull;
+
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 
 use async_lock::Mutex;
 
@@ -461,6 +472,23 @@ unsafe impl AsyncParameter for &'static mut [u8] {
         0
     }
 }
+unsafe impl AsyncParameter for &'static str {
+    fn ptr(&self) -> Option<NonNull<u8>> {
+        self.as_bytes().first().map(NonNull::from)
+    }
+
+    fn ptr2(&self) -> Option<NonNull<u8>> {
+        None
+    }
+
+    fn len(&self) -> usize {
+        <str>::len(self)
+    }
+
+    fn len2(&self) -> usize {
+        0
+    }
+}
 unsafe impl AsyncParameter for Vec<u8> {
     fn ptr(&self) -> Option<NonNull<u8>> {
         self.first().map(NonNull::from)
@@ -495,6 +523,150 @@ unsafe impl AsyncParameter for Box<[u8]> {
         0
     }
 }
+unsafe impl AsyncParameter for &'static OsStr {
+    fn ptr(&self) -> Option<NonNull<u8>> {
+        #[cfg(unix)]
+        return self.as_bytes().first().map(NonNull::from);
+
+        // SAFETY: just cast the pointer to a u8 pointer.
+        #[cfg(windows)]
+        return unsafe { Some(NonNull::new_unchecked(self.as_ptr() as *mut u8)) };
+    }
+
+    fn ptr2(&self) -> Option<NonNull<u8>> {
+        None
+    }
+
+    fn len(&self) -> usize {
+        OsStr::len(self)
+    }
+
+    fn len2(&self) -> usize {
+        0
+    }
+}
+unsafe impl AsyncParameter for OsString {
+    fn ptr(&self) -> Option<NonNull<u8>> {
+        #[cfg(unix)]
+        return self.as_bytes().first().map(NonNull::from);
+
+        // SAFETY: just cast the pointer to a u8 pointer.
+        #[cfg(windows)]
+        return unsafe { Some(NonNull::new_unchecked(self.as_os_str().as_ptr() as *mut u8)) };
+    }
+
+    fn ptr2(&self) -> Option<NonNull<u8>> {
+        None
+    }
+
+    fn len(&self) -> usize {
+        <OsStr>::len(self)
+    }
+
+    fn len2(&self) -> usize {
+        0
+    }
+}
+unsafe impl AsyncParameter for Box<OsStr> {
+    fn ptr(&self) -> Option<NonNull<u8>> {
+        #[cfg(unix)]
+        return self.as_bytes().first().map(NonNull::from);
+
+        // SAFETY: just cast the pointer to a u8 pointer.
+        #[cfg(windows)]
+        return unsafe { Some(NonNull::new_unchecked((&**self).as_ptr() as *mut u8)) };
+    }
+
+    fn ptr2(&self) -> Option<NonNull<u8>> {
+        None
+    }
+
+    fn len(&self) -> usize {
+        OsStr::len(self)
+    }
+
+    fn len2(&self) -> usize {
+        0
+    }
+}
+unsafe impl AsyncParameter for &'static Path {
+    fn ptr(&self) -> Option<NonNull<u8>> {
+        self.as_os_str().ptr()
+    }
+
+    fn len(&self) -> usize {
+        self.as_os_str().len()
+    }
+
+    fn ptr2(&self) -> Option<NonNull<u8>> {
+        None
+    }
+
+    fn len2(&self) -> usize {
+        0
+    }
+}
+unsafe impl AsyncParameter for PathBuf {
+    fn ptr(&self) -> Option<NonNull<u8>> {
+        #[cfg(unix)]
+        return self.as_os_str().as_bytes().first().map(NonNull::from);
+
+        // SAFETY: just cast the pointer to a u8 pointer.
+        #[cfg(windows)]
+        return unsafe { Some(NonNull::new_unchecked(self.as_os_str().as_ptr() as *mut u8)) };
+    }
+
+    fn len(&self) -> usize {
+        self.as_os_str().len()
+    }
+
+    fn ptr2(&self) -> Option<NonNull<u8>> {
+        None
+    }
+
+    fn len2(&self) -> usize {
+        0
+    }
+}
+unsafe impl AsyncParameter for Box<Path> {
+    fn ptr(&self) -> Option<NonNull<u8>> {
+        #[cfg(unix)]
+        return self.as_os_str().as_bytes().first().map(NonNull::from);
+
+        // SAFETY: just cast the pointer to a u8 pointer.
+        #[cfg(windows)]
+        return unsafe { Some(NonNull::new_unchecked(self.as_os_str().as_ptr() as *mut u8)) };
+    }
+
+    fn len(&self) -> usize {
+        self.as_os_str().len()
+    }
+
+    fn ptr2(&self) -> Option<NonNull<u8>> {
+        None
+    }
+
+    fn len2(&self) -> usize {
+        0
+    }
+}
+unsafe impl<A: AsyncParameter, B: AsyncParameter> AsyncParameter for (A, B) {
+    fn ptr(&self) -> Option<NonNull<u8>> {
+        self.0.ptr()
+    }
+
+    fn ptr2(&self) -> Option<NonNull<u8>> {
+        self.1.ptr()
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn len2(&self) -> usize {
+        self.1.len()
+    }
+}
 
 /// A buffer that may be passed to a system-specific operation.
 ///
@@ -514,6 +686,7 @@ unsafe impl<const N: usize> Buf for [u8; N] {}
 unsafe impl<const N: usize> Buf for &'static [u8; N] {}
 unsafe impl Buf for &'static [u8] {}
 unsafe impl Buf for &'static mut [u8] {}
+unsafe impl Buf for &'static str {}
 unsafe impl Buf for Vec<u8> {}
 unsafe impl Buf for Box<[u8]> {}
 
