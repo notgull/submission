@@ -92,11 +92,11 @@ impl Ring {
         Ok(Events::new())
     }
 
-    pub(crate) fn register(&self, _fd: RawFd) -> io::Result<()> {
+    pub(crate) fn register(&self, fd: RawFd) -> io::Result<RawFd> {
         // This does nothing for now; in the future, we may want to use the `IORING_REGISTER_FILES`
         // opcode to register the file descriptor with the ring.
 
-        Ok(())
+        Ok(fd)
     }
 
     pub(crate) fn deregister(&self, _fd: RawFd) -> io::Result<()> {
@@ -161,6 +161,7 @@ impl Ring {
         Ok(())
     }
 
+    #[allow(clippy::ptr_arg)]
     pub(crate) fn steal_early(&self, _events: &mut Vec<Completion>) -> usize {
         0
     }

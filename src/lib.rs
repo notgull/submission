@@ -75,7 +75,11 @@ impl Ring {
     }
 
     /// Register a source of events.
-    pub fn register(&self, source: &impl AsRaw) -> io::Result<()> {
+    /// 
+    /// A different handle may need to be used when actually polling
+    /// for events, depending on the platform. This function returns
+    /// that handle.
+    pub fn register(&self, source: &impl AsRaw) -> io::Result<Raw> {
         self.inner.register(source.as_raw())
     }
 

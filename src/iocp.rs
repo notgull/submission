@@ -89,7 +89,7 @@ impl Ring {
         Ok(Events(None))
     }
 
-    pub(crate) fn register(&self, fd: RawHandle) -> io::Result<()> {
+    pub(crate) fn register(&self, fd: RawHandle) -> io::Result<RawHandle> {
         // Reopen the handle so that it supports overlapped I/O.
         let handle = fd as found::HANDLE;
 
@@ -103,11 +103,13 @@ impl Ring {
         };
 
         if result == found::INVALID_HANDLE_VALUE {
-            panic!("{}", io::Error::last_os_error());
             return Err(io::Error::last_os_error());
         }
 
-        self.port.associate(result, 0x1337)
+        self.port.associate(result, 0x1337)?;
+        
+        // TODO: Use strict provenance once it is stabilized.
+        Ok(result as _)
     }
 
     pub(crate) fn deregister(&self, _fd: RawHandle) -> io::Result<()> {
