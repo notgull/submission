@@ -31,8 +31,6 @@ use std::ptr::NonNull;
 
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
-#[cfg(windows)]
-use std::os::windows::ffi::OsStrExt;
 
 use async_lock::Mutex;
 
@@ -101,14 +99,14 @@ impl Ring {
         project.cancel.ring = Some(self);
 
         // Create the operation and add it to our pin.
-        project.operation.set(Some(unsafe {
+        project.operation.set(Some(
             project
                 .params
-                .make_operation(&*project.buffer, project.cancel.key)
-        }));
+                .make_operation(&*project.buffer, project.cancel.key),
+        ));
 
         // SAFETY: Operation can only contain valid events.
-        unsafe { self.inner.submit(project.operation.as_pin_mut().unwrap()) }
+        self.inner.submit(project.operation.as_pin_mut().unwrap())
     }
 
     /// Cancels an operation.
@@ -555,7 +553,11 @@ unsafe impl AsyncParameter for OsString {
 
         // SAFETY: just cast the pointer to a u8 pointer.
         #[cfg(windows)]
-        return unsafe { Some(NonNull::new_unchecked(self.as_os_str().as_ptr() as *mut u8)) };
+        return unsafe {
+            Some(NonNull::new_unchecked(
+                self.as_os_str() as *const OsStr as *const u8 as *mut u8,
+            ))
+        };
     }
 
     fn ptr2(&self) -> Option<NonNull<u8>> {
@@ -577,7 +579,11 @@ unsafe impl AsyncParameter for Box<OsStr> {
 
         // SAFETY: just cast the pointer to a u8 pointer.
         #[cfg(windows)]
-        return unsafe { Some(NonNull::new_unchecked((&**self).as_ptr() as *mut u8)) };
+        return unsafe {
+            Some(NonNull::new_unchecked(
+                (&**self) as *const OsStr as *const u8 as *mut u8,
+            ))
+        };
     }
 
     fn ptr2(&self) -> Option<NonNull<u8>> {
@@ -616,7 +622,11 @@ unsafe impl AsyncParameter for PathBuf {
 
         // SAFETY: just cast the pointer to a u8 pointer.
         #[cfg(windows)]
-        return unsafe { Some(NonNull::new_unchecked(self.as_os_str().as_ptr() as *mut u8)) };
+        return unsafe {
+            Some(NonNull::new_unchecked(
+                self.as_os_str() as *const OsStr as *const u8 as *mut u8,
+            ))
+        };
     }
 
     fn len(&self) -> usize {
@@ -638,7 +648,11 @@ unsafe impl AsyncParameter for Box<Path> {
 
         // SAFETY: just cast the pointer to a u8 pointer.
         #[cfg(windows)]
-        return unsafe { Some(NonNull::new_unchecked(self.as_os_str().as_ptr() as *mut u8)) };
+        return unsafe {
+            Some(NonNull::new_unchecked(
+                self.as_os_str() as *const OsStr as *const u8 as *mut u8,
+            ))
+        };
     }
 
     fn len(&self) -> usize {

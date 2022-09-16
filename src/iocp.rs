@@ -10,16 +10,18 @@ use std::cell::UnsafeCell;
 use std::fmt;
 use std::io;
 use std::marker::PhantomPinned;
-use std::mem::{zeroed, ManuallyDrop, MaybeUninit};
-use std::os::windows::io::{AsRawHandle, RawHandle};
+use std::mem::{self, zeroed, ManuallyDrop, MaybeUninit};
+use std::os::windows::io::RawHandle;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use windows_sys::Win32::Foundation as found;
+use windows_sys::Win32::Storage::FileSystem as files;
+use windows_sys::Win32::System::WindowsProgramming as prog;
 use windows_sys::Win32::System::IO as wio;
 
-const WAKEUP_KEY: u32 = std::u32::MAX;
-const SHUTDOWN_KEY: u32 = std::u32::MAX - 1;
+const WAKEUP_KEY: usize = std::usize::MAX;
+const SHUTDOWN_KEY: usize = std::usize::MAX - 1;
 
 pub(crate) struct Ring {
     /// The raw handle to the IO completion port.
@@ -33,7 +35,7 @@ pub(crate) struct Ring {
     /// is an iterator so that it will keep running and accumulating events
     /// until it has too many, in which case the thread is freed up for
     /// other work.
-    event_loop: Unblock<EventLoop>,
+    event_loop: Mutex<Unblock<EventLoop>>,
 
     /// Event notifications for fixed events.
     ///
@@ -67,11 +69,11 @@ impl Ring {
         let port = CompletionPort::new()?;
 
         // Spawn a task for polling for events on the blocking threadpool.
-        let event_loop = Unblock::with_capacity(MAX_EVENTS, EventLoop::new(&port));
+        let event_loop = Unblock::with_capacity(MAX_EVENTS, EventLoop::new(&port)?);
 
         Ok(Self {
-            port,
-            event_loop,
+            port: ManuallyDrop::new(port),
+            event_loop: Mutex::new(event_loop),
             notifications: Box::pin(Notifications {
                 wakeup: UnsafeCell::new(unsafe { zeroed() }),
                 shutdown: UnsafeCell::new(unsafe { zeroed() }),
@@ -97,21 +99,21 @@ impl Ring {
         let project = operation.project();
 
         // Try the fast path first.
-        if let Some(res) = unsafe {
-            project.ty.run(
-                project.handle,
-                project.buf,
-                project.len,
-                &mut project.overlapped,
+        if let Some(res) = project
+            .ty
+            .run(
+                *project.handle,
+                project.overlapped.get_unchecked_mut(),
+                *project.buf,
+                *project.len,
             )
-        }
-        .transpose()
+            .transpose()
         {
             // We got an early result. Push it into our queue.
             self.early_events
                 .push(Completion {
-                    key: project.key,
-                    result: res,
+                    key: *project.key,
+                    result: Some(res),
                 })
                 .ok();
         }
@@ -121,11 +123,10 @@ impl Ring {
 
     pub(crate) fn cancel(&self, operation: Pin<&mut Operation>, _key: u64) -> io::Result<()> {
         // Run CancelIoEx to cancel this specific operation.
-        let mut operation = operation.project();
-        let handle = operation.handle;
-        let overlapped = &mut operation.overlapped;
+        let operation = operation.project();
+        let handle = *operation.handle;
 
-        let result = unsafe { wio::CancelIoEx(handle, overlapped) };
+        let result = unsafe { wio::CancelIoEx(handle, operation.overlapped.get_unchecked_mut()) };
 
         if result == 0 {
             Err(io::Error::last_os_error())
@@ -151,19 +152,23 @@ impl Ring {
 
     pub(crate) async fn wait(&self, events: &mut Events, park: bool) -> io::Result<usize> {
         // We are looking for the first non-empty event cache.
-        let mut resolve_event = self.event_loop.find(|event| event.len != 0);
+        let mut event_loop = self.event_loop.lock().unwrap();
+        let mut resolve_event = event_loop.find(|event| event.len != 0);
 
         // Poll it once to see if it's already ready.
         match future::poll_once(&mut resolve_event).await {
-            Some(Some(events)) => {
+            Some(Some(new_events)) => {
                 // One is already available, we're done.
-                events.0 = Some(events);
-                return Ok(events.len);
+                let len = new_events.len;
+                events.0 = Some(new_events);
+                return Ok(len);
             }
             Some(None) => {
-                // Notify the reactor and begin polling in ernest.
+                panic!("Event loop terminated")
             }
-            None => panic!("event loop terminated"),
+            None => {
+                // First poll returned Poll::Pending, we need to notify the reactor.
+            }
         }
 
         // Return if we don't want to park.
@@ -179,9 +184,10 @@ impl Ring {
 
         // Wait for the event loop to return.
         match resolve_event.await {
-            Some(events) => {
-                events.0 = Some(events);
-                return Ok(events.len);
+            Some(new_events) => {
+                let len = new_events.len;
+                events.0 = Some(new_events);
+                return Ok(len);
             }
             None => panic!("event loop terminated"),
         }
@@ -203,19 +209,19 @@ impl Drop for Ring {
 pub(crate) struct Events(Option<InnerEvents>);
 
 impl Events {
-    pub(crate) fn iter(&self) -> impl Iterator<Item = Completion> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = Completion> + '_ {
         self.0
             .iter()
-            .flat_map(|inner| inner.entries())
+            .flat_map(|inner| inner.entries(inner.len))
             .filter_map(|entry| {
                 if matches!(entry.lpCompletionKey, WAKEUP_KEY | SHUTDOWN_KEY) {
                     None
                 } else {
-                    // Get the pointer to the operation.
-                    let overlapped = unsafe { &*(entry.lpOverlapped as *mut Operation) };
+                    // Get the pointer to the overlapped structure.
+                    let overlapped = unsafe { &*(entry.lpOverlapped) };
 
                     // Get the result from the OVERLAPPED structure.
-                    let result = if overlapped.Internal == found::ERROR_SUCCESS {
+                    let result = if overlapped.Internal as u32 == found::ERROR_SUCCESS {
                         Ok(overlapped.InternalHigh as _)
                     } else {
                         Err(io::Error::from_raw_os_error(overlapped.Internal as _))
@@ -226,7 +232,7 @@ impl Events {
 
                     Some(Completion {
                         key: operation.key,
-                        result,
+                        result: Some(result),
                     })
                 }
             })
@@ -244,6 +250,9 @@ struct InnerEvents {
     actual: usize,
 }
 
+unsafe impl Send for InnerEvents {}
+unsafe impl Sync for InnerEvents {}
+
 impl InnerEvents {
     fn new() -> Self {
         Self {
@@ -259,17 +268,17 @@ impl InnerEvents {
 
     /// Iterate over valid entries.
     fn entries(&self, tail: usize) -> impl Iterator<Item = &wio::OVERLAPPED_ENTRY> {
-        let len = self.len - tail;
-        self.buffer[tail..len]
+        self.buffer[tail..self.len]
             .iter()
             .map(|e| unsafe { &*e.as_ptr() })
     }
 }
 
 pin_project_lite::pin_project! {
-    //#[repr(C)]
+    #[repr(C)]
     pub(crate) struct Operation {
         // The OVERLAPPED structure for operation data storage.
+        #[pin]
         overlapped: wio::OVERLAPPED,
 
         // The raw handle to the IO completion port.
@@ -279,7 +288,7 @@ pin_project_lite::pin_project! {
         buf: *mut u8,
 
         // Length of buffer.
-        len: u32
+        len: u32,
 
         // The type of this operation.
         ty: OpType,
@@ -288,18 +297,12 @@ pin_project_lite::pin_project! {
         key: u64,
 
         #[pin]
-        _pin: PhantomPinned,
+        _pin: PhantomPinned
     }
 }
 
 impl Operation {
-    pub(crate) fn read(
-        fd: RawHandle,
-        buf: *mut u8,
-        len: usize,
-        offset: u64,
-        key: u64,
-    ) -> Self {
+    pub(crate) fn read(fd: RawHandle, buf: *mut u8, len: usize, offset: u64, key: u64) -> Self {
         Self {
             overlapped: overlapped_offset(offset),
             handle: fd as _,
@@ -311,13 +314,7 @@ impl Operation {
         }
     }
 
-    pub(crate) fn write(
-        fd: RawHandle,
-        buf: *mut u8,
-        len: usize,
-        offset: u64,
-        key: u64,
-    ) -> Self {
+    pub(crate) fn write(fd: RawHandle, buf: *mut u8, len: usize, offset: u64, key: u64) -> Self {
         Self {
             overlapped: overlapped_offset(offset),
             handle: fd as _,
@@ -350,10 +347,20 @@ impl OpType {
         let mut out_bytes = MaybeUninit::uninit();
 
         let result = match self {
-            OpType::Read => wio::ReadFile(handle, buffer, len, out_bytes.as_mut_ptr(), overlapped),
-            OpType::Write => {
-                wio::WriteFile(handle, buffer, len, out_bytes.as_mut_ptr(), overlapped)
-            }
+            OpType::Read => files::ReadFile(
+                handle,
+                buffer.cast(),
+                len,
+                out_bytes.as_mut_ptr(),
+                overlapped,
+            ),
+            OpType::Write => files::WriteFile(
+                handle,
+                buffer.cast() as *const _,
+                len,
+                out_bytes.as_mut_ptr(),
+                overlapped,
+            ),
         };
 
         if result == 0 {
@@ -366,7 +373,7 @@ impl OpType {
             Err(io::Error::last_os_error())
         } else {
             // Tell how many bytes were written.
-            Ok(Some(unsafe { out_bytes.assume_init() }))
+            Ok(Some(out_bytes.assume_init() as isize))
         }
     }
 }
@@ -391,7 +398,7 @@ impl CompletionPort {
     }
 
     /// Associate a handle with this completion port.
-    fn associate(&self, handle: found::HANDLE, key: u32) -> io::Result<()> {
+    fn associate(&self, handle: found::HANDLE, key: usize) -> io::Result<()> {
         let handle = unsafe { wio::CreateIoCompletionPort(handle, self.0, key, 0) };
 
         if handle == 0 {
@@ -414,7 +421,7 @@ impl CompletionPort {
                 space.as_mut_ptr() as _,
                 space.len() as _,
                 result_entries.as_mut_ptr(),
-                found::INFINITE,
+                prog::INFINITE,
                 0,
             )
         };
@@ -435,8 +442,8 @@ impl CompletionPort {
     }
 
     /// Notify the completion port with a specific event key and OVERLAPPED.
-    unsafe fn notify(&self, key: u32, overlapped: *mut wio::OVERLAPPED) -> io::Result<()> {
-        let res = unsafe { wio::PostQueuedCompletionStatus(self.0, 0, key, overlapped) };
+    unsafe fn notify(&self, key: usize, overlapped: *mut wio::OVERLAPPED) -> io::Result<()> {
+        let res = wio::PostQueuedCompletionStatus(self.0, 0, key, overlapped);
 
         if res == 0 {
             Err(io::Error::last_os_error())
@@ -465,6 +472,8 @@ struct EventLoop {
     /// Have we been shut down?
     shutdown: bool,
 }
+
+unsafe impl Send for EventLoop {}
 
 impl EventLoop {
     fn new(port: &CompletionPort) -> io::Result<Self> {
@@ -531,9 +540,8 @@ fn overlapped_offset(offset: u64) -> wio::OVERLAPPED {
         OffsetHigh: (offset >> 32) as _,
     };
 
-    unsafe {
-        overlapped.Anonymous.Anonymous = offset_container;
-    }
+    // Set the union field.
+    overlapped.Anonymous.Anonymous = offset_container;
 
     overlapped
 }
