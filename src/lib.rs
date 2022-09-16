@@ -75,7 +75,7 @@ impl Ring {
     }
 
     /// Register a source of events.
-    /// 
+    ///
     /// A different handle may need to be used when actually polling
     /// for events, depending on the platform. This function returns
     /// that handle.

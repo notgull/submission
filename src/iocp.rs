@@ -107,8 +107,8 @@ impl Ring {
         }
 
         self.port.associate(result, 0x1337)?;
-        
-        // TODO: Use strict provenance once it is stabilized.
+
+        // TODO(notgull): Use strict provenance once it is stabilized.
         Ok(result as _)
     }
 
@@ -375,22 +375,23 @@ impl OpType {
             OpType::Read => {
                 log::trace!("syscall: ReadFile");
                 files::ReadFile(
-                handle,
-                buffer.cast(),
-                len,
-                out_bytes.as_mut_ptr(),
-                overlapped,
+                    handle,
+                    buffer.cast(),
+                    len,
+                    out_bytes.as_mut_ptr(),
+                    overlapped,
                 )
-            },
+            }
             OpType::Write => {
                 log::trace!("syscall: WriteFile");
                 files::WriteFile(
-                handle,
-                buffer.cast() as *const _,
-                len,
-                out_bytes.as_mut_ptr(),
-                overlapped,
-            )},
+                    handle,
+                    buffer.cast() as *const _,
+                    len,
+                    out_bytes.as_mut_ptr(),
+                    overlapped,
+                )
+            }
         };
 
         if result == 0 {
