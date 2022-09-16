@@ -90,7 +90,24 @@ impl Ring {
     }
 
     pub(crate) fn register(&self, fd: RawHandle) -> io::Result<()> {
-        self.port.associate(fd as _, 0x1337)
+        // Reopen the handle so that it supports overlapped I/O.
+        let handle = fd as found::HANDLE;
+
+        let result = unsafe {
+            files::ReOpenFile(
+                handle,
+                files::FILE_GENERIC_READ | files::FILE_GENERIC_WRITE,
+                files::FILE_SHARE_READ | files::FILE_SHARE_WRITE | files::FILE_SHARE_DELETE,
+                files::FILE_FLAG_OVERLAPPED,
+            )
+        };
+
+        if result == found::INVALID_HANDLE_VALUE {
+            panic!("{}", io::Error::last_os_error());
+            return Err(io::Error::last_os_error());
+        }
+
+        self.port.associate(result, 0x1337)
     }
 
     pub(crate) fn deregister(&self, _fd: RawHandle) -> io::Result<()> {
@@ -353,20 +370,25 @@ impl OpType {
         let mut out_bytes = MaybeUninit::uninit();
 
         let result = match self {
-            OpType::Read => files::ReadFile(
+            OpType::Read => {
+                log::trace!("syscall: ReadFile");
+                files::ReadFile(
                 handle,
                 buffer.cast(),
                 len,
                 out_bytes.as_mut_ptr(),
                 overlapped,
-            ),
-            OpType::Write => files::WriteFile(
+                )
+            },
+            OpType::Write => {
+                log::trace!("syscall: WriteFile");
+                files::WriteFile(
                 handle,
                 buffer.cast() as *const _,
                 len,
                 out_bytes.as_mut_ptr(),
                 overlapped,
-            ),
+            )},
         };
 
         if result == 0 {
@@ -405,6 +427,7 @@ unsafe impl Sync for CompletionPort {}
 impl CompletionPort {
     /// Create a new, unassociated `CompletionPort`.
     fn new() -> io::Result<Self> {
+        log::trace!("syscall: CreateIoCompletionPort (creation)");
         let handle = unsafe { wio::CreateIoCompletionPort(found::INVALID_HANDLE_VALUE, 0, 0, 0) };
 
         if handle == 0 {
@@ -416,6 +439,7 @@ impl CompletionPort {
 
     /// Associate a handle with this completion port.
     fn associate(&self, handle: found::HANDLE, key: usize) -> io::Result<()> {
+        log::trace!("syscall: CreateIoCompletionPort (associate)");
         let handle = unsafe { wio::CreateIoCompletionPort(handle, self.0, key, 0) };
 
         if handle == 0 {
@@ -432,6 +456,7 @@ impl CompletionPort {
         let space = events.open_space();
 
         // Call the function.
+        log::trace!("syscall: GetQueuedCompletionStatusEx");
         let res = unsafe {
             wio::GetQueuedCompletionStatusEx(
                 self.0,
@@ -442,6 +467,7 @@ impl CompletionPort {
                 0,
             )
         };
+        log::trace!("EventLoop: finished wait for new status events");
 
         // Check if the call succeeded.
         if res == 0 {
@@ -460,6 +486,7 @@ impl CompletionPort {
 
     /// Notify the completion port with a specific event key and OVERLAPPED.
     unsafe fn notify(&self, key: usize, overlapped: *mut wio::OVERLAPPED) -> io::Result<()> {
+        log::trace!("syscall: PostQueuedCompletionStatus");
         let res = wio::PostQueuedCompletionStatus(self.0, 0, key, overlapped);
 
         if res == 0 {
