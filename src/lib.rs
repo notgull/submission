@@ -121,16 +121,19 @@ impl Ring {
 
     /// Wait for completion events.
     pub async fn wait(&self, events: &mut Vec<Completion>) -> io::Result<usize> {
+        // If we can resolve any events early, do so.
+        let early_count = self.inner.steal_early(events);
+
         // Lock the completion queue.
         if let Some(mut lock) = self.events.try_lock() {
             // Wait for events with the completion interface.
-            let amt = self.inner.wait(&mut lock).await?;
+            let amt = self.inner.wait(&mut lock, early_count == 0).await?;
 
             // Extend user events with ours.
             events.extend(lock.iter());
 
             // Return th number of events.
-            Ok(amt)
+            Ok(early_count.saturating_add(amt))
         } else {
             Ok(0)
         }
@@ -530,7 +533,7 @@ unsafe impl AsyncParameter for &'static OsStr {
 
         // SAFETY: just cast the pointer to a u8 pointer.
         #[cfg(windows)]
-        return unsafe { Some(NonNull::new_unchecked(self.as_ptr() as *mut u8)) };
+        return unsafe { Some(NonNull::new_unchecked(*self as *const _ as *mut u8)) };
     }
 
     fn ptr2(&self) -> Option<NonNull<u8>> {

@@ -3,10 +3,12 @@
 use super::Completion;
 
 use blocking::Unblock;
+use concurrent_queue::ConcurrentQueue;
 use futures_lite::{future, prelude::*};
 
 use std::cell::UnsafeCell;
-use std::io::Result;
+use std::fmt;
+use std::io;
 use std::marker::PhantomPinned;
 use std::mem::{zeroed, ManuallyDrop, MaybeUninit};
 use std::os::windows::io::{AsRawHandle, RawHandle};
@@ -37,6 +39,17 @@ pub(crate) struct Ring {
     ///
     /// These are pinned to the heap.
     notifications: Pin<Box<Notifications>>,
+
+    /// Events that completed early.
+    early_events: ConcurrentQueue<Completion>,
+}
+
+impl fmt::Debug for Ring {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Ring")
+            .field("early_events", &self.early_events.len())
+            .finish_non_exhaustive()
+    }
 }
 
 struct Notifications {
@@ -54,7 +67,7 @@ impl Ring {
         let port = CompletionPort::new()?;
 
         // Spawn a task for polling for events on the blocking threadpool.
-        let event_loop = Unblock::new(MAX_EVENTS, EventLoop::new(&port));
+        let event_loop = Unblock::with_capacity(MAX_EVENTS, EventLoop::new(&port));
 
         Ok(Self {
             port,
@@ -63,6 +76,7 @@ impl Ring {
                 wakeup: UnsafeCell::new(unsafe { zeroed() }),
                 shutdown: UnsafeCell::new(unsafe { zeroed() }),
             }),
+            early_events: ConcurrentQueue::unbounded(),
         })
     }
 
@@ -80,9 +94,29 @@ impl Ring {
     }
 
     pub(crate) unsafe fn submit(&self, operation: Pin<&mut Operation>) -> io::Result<()> {
-        // Run with the event loop.
         let project = operation.project();
-        todo!()
+
+        // Try the fast path first.
+        if let Some(res) = unsafe {
+            project.ty.run(
+                project.handle,
+                project.buf,
+                project.len,
+                &mut project.overlapped,
+            )
+        }
+        .transpose()
+        {
+            // We got an early result. Push it into our queue.
+            self.early_events
+                .push(Completion {
+                    key: project.key,
+                    result: res,
+                })
+                .ok();
+        }
+
+        Ok(())
     }
 
     pub(crate) fn cancel(&self, operation: Pin<&mut Operation>, _key: u64) -> io::Result<()> {
@@ -100,7 +134,22 @@ impl Ring {
         }
     }
 
-    pub(crate) async fn wait(&self, events: &mut Events) -> io::Result<usize> {
+    pub(crate) fn steal_early(&self, events: &mut Vec<Completion>) -> usize {
+        let mut pushed = 0;
+
+        if !self.early_events.is_empty() {
+            events.reserve(self.early_events.len());
+
+            while let Ok(early_event) = self.early_events.pop() {
+                events.push(early_event);
+                pushed += 1;
+            }
+        }
+
+        pushed
+    }
+
+    pub(crate) async fn wait(&self, events: &mut Events, park: bool) -> io::Result<usize> {
         // We are looking for the first non-empty event cache.
         let mut resolve_event = self.event_loop.find(|event| event.len != 0);
 
@@ -115,6 +164,11 @@ impl Ring {
                 // Notify the reactor and begin polling in ernest.
             }
             None => panic!("event loop terminated"),
+        }
+
+        // Return if we don't want to park.
+        if !park {
+            return Ok(0);
         }
 
         // Notify the event loop so that it returns early.
@@ -157,7 +211,23 @@ impl Events {
                 if matches!(entry.lpCompletionKey, WAKEUP_KEY | SHUTDOWN_KEY) {
                     None
                 } else {
-                    todo!()
+                    // Get the pointer to the operation.
+                    let overlapped = unsafe { &*(entry.lpOverlapped as *mut Operation) };
+
+                    // Get the result from the OVERLAPPED structure.
+                    let result = if overlapped.Internal == found::ERROR_SUCCESS {
+                        Ok(overlapped.InternalHigh as _)
+                    } else {
+                        Err(io::Error::from_raw_os_error(overlapped.Internal as _))
+                    };
+
+                    // Cast the OVERLAPPED point to an Operation to get our key.
+                    let operation = unsafe { &*(entry.lpOverlapped as *mut Operation) };
+
+                    Some(Completion {
+                        key: operation.key,
+                        result,
+                    })
                 }
             })
     }
@@ -197,22 +267,66 @@ impl InnerEvents {
 }
 
 pin_project_lite::pin_project! {
-    #[repr(C)]
+    //#[repr(C)]
     pub(crate) struct Operation {
         // The OVERLAPPED structure for operation data storage.
         overlapped: wio::OVERLAPPED,
 
-        /// The raw handle to the IO completion port.
+        // The raw handle to the IO completion port.
         handle: found::HANDLE,
 
-        /// The type of this operation.
+        // Pointer to the buffer.
+        buf: *mut u8,
+
+        // Length of buffer.
+        len: u32
+
+        // The type of this operation.
         ty: OpType,
 
-        /// The key associated with this operation.
+        // The key associated with this operation.
         key: u64,
 
         #[pin]
         _pin: PhantomPinned,
+    }
+}
+
+impl Operation {
+    pub(crate) fn read(
+        fd: RawHandle,
+        buf: *mut u8,
+        len: usize,
+        offset: u64,
+        key: u64,
+    ) -> Self {
+        Self {
+            overlapped: overlapped_offset(offset),
+            handle: fd as _,
+            buf,
+            len: len as _,
+            ty: OpType::Read,
+            key,
+            _pin: PhantomPinned,
+        }
+    }
+
+    pub(crate) fn write(
+        fd: RawHandle,
+        buf: *mut u8,
+        len: usize,
+        offset: u64,
+        key: u64,
+    ) -> Self {
+        Self {
+            overlapped: overlapped_offset(offset),
+            handle: fd as _,
+            buf,
+            len: len as _,
+            ty: OpType::Write,
+            key,
+            _pin: PhantomPinned,
+        }
     }
 }
 
@@ -224,23 +338,35 @@ enum OpType {
 
 impl OpType {
     /// Run this operation on the given handle.
+    ///
+    /// Returns `Some` if the operation completed immediately.
     unsafe fn run(
         &self,
         handle: found::HANDLE,
         overlapped: *mut wio::OVERLAPPED,
         buffer: *mut u8,
         len: u32,
-    ) -> io::Result<isize> {
+    ) -> io::Result<Option<isize>> {
+        let mut out_bytes = MaybeUninit::uninit();
+
         let result = match self {
-            OpType::Read => wio::ReadFile(handle, buffer, len, overlapped),
-            OpType::Write => wio::WriteFile(handle, buffer, len, overlapped),
+            OpType::Read => wio::ReadFile(handle, buffer, len, out_bytes.as_mut_ptr(), overlapped),
+            OpType::Write => {
+                wio::WriteFile(handle, buffer, len, out_bytes.as_mut_ptr(), overlapped)
+            }
         };
 
-        if result == found::ERROR_IO_PENDING {
-        } else if result == 0 {
+        if result == 0 {
+            // If the error code is ERROR_IO_PENDING, then the operation is
+            // pending and we should return `None`.
+            if found::GetLastError() == found::ERROR_IO_PENDING {
+                return Ok(None);
+            }
+
             Err(io::Error::last_os_error())
         } else {
-            Ok(result)
+            // Tell how many bytes were written.
+            Ok(Some(unsafe { out_bytes.assume_init() }))
         }
     }
 }
@@ -396,3 +522,18 @@ impl Iterator for EventLoop {
 }
 
 impl std::iter::FusedIterator for EventLoop {}
+
+fn overlapped_offset(offset: u64) -> wio::OVERLAPPED {
+    let mut overlapped: wio::OVERLAPPED = unsafe { zeroed() };
+
+    let offset_container = wio::OVERLAPPED_0_0 {
+        Offset: offset as _,
+        OffsetHigh: (offset >> 32) as _,
+    };
+
+    unsafe {
+        overlapped.Anonymous.Anonymous = offset_container;
+    }
+
+    overlapped
+}

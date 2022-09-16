@@ -161,8 +161,13 @@ impl Ring {
         Ok(())
     }
 
+    pub(crate) fn steal_early(&self, _events: &mut Vec<Completion>) -> usize {
+        0
+    }
+
+    /// Poll for completion events.
     #[allow(clippy::await_holding_lock)]
-    pub(crate) async fn wait(&self, events: &mut Events) -> io::Result<usize> {
+    pub(crate) async fn wait(&self, events: &mut Events, park: bool) -> io::Result<usize> {
         // Indicate that we are waiting.
         let _guard = CallOnDrop(|| {
             self.waiting.store(false, SeqCst);
@@ -172,6 +177,11 @@ impl Ring {
         loop {
             match self.poll_for_events(events)? {
                 0 => {
+                    // If we don't park, return;
+                    if !park {
+                        return Ok(0);
+                    }
+
                     // Wait for new events.
                     let mut buffer = [0; 8];
                     (&self.new_events).read(&mut buffer).await?;
