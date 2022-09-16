@@ -273,6 +273,9 @@ impl<'a, T> Operation<'a, T> {
     }
 }
 
+unsafe impl<T: Send> Send for Operation<'_, T> {}
+unsafe impl<T: Sync> Sync for Operation<'_, T> {}
+
 /// A structure for building an `Operation`.
 #[derive(Debug)]
 pub struct OperationBuilder {

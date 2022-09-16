@@ -2,6 +2,7 @@
 
 use super::Completion;
 
+use async_lock::Mutex;
 use blocking::Unblock;
 use concurrent_queue::ConcurrentQueue;
 use futures_lite::{future, prelude::*};
@@ -13,7 +14,6 @@ use std::marker::PhantomPinned;
 use std::mem::{self, zeroed, ManuallyDrop, MaybeUninit};
 use std::os::windows::io::RawHandle;
 use std::pin::Pin;
-use std::sync::Mutex;
 
 use windows_sys::Win32::Foundation as found;
 use windows_sys::Win32::Storage::FileSystem as files;
@@ -45,6 +45,9 @@ pub(crate) struct Ring {
     /// Events that completed early.
     early_events: ConcurrentQueue<Completion>,
 }
+
+unsafe impl Send for Ring {}
+unsafe impl Sync for Ring {}
 
 impl fmt::Debug for Ring {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -152,7 +155,7 @@ impl Ring {
 
     pub(crate) async fn wait(&self, events: &mut Events, park: bool) -> io::Result<usize> {
         // We are looking for the first non-empty event cache.
-        let mut event_loop = self.event_loop.lock().unwrap();
+        let mut event_loop = self.event_loop.lock().await;
         let mut resolve_event = event_loop.find(|event| event.len != 0);
 
         // Poll it once to see if it's already ready.
@@ -164,7 +167,7 @@ impl Ring {
                 return Ok(len);
             }
             Some(None) => {
-                panic!("Event loop terminated")
+                unreachable!("Event loop terminated")
             }
             None => {
                 // First poll returned Poll::Pending, we need to notify the reactor.
@@ -300,6 +303,8 @@ pin_project_lite::pin_project! {
         _pin: PhantomPinned
     }
 }
+
+unsafe impl Send for Operation {}
 
 impl Operation {
     pub(crate) fn read(fd: RawHandle, buf: *mut u8, len: usize, offset: u64, key: u64) -> Self {
