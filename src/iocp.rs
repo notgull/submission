@@ -175,13 +175,13 @@ impl Ring {
     pub(crate) async fn wait(&self, events: &mut Events, park: bool) -> io::Result<usize> {
         // We are looking for the first non-empty event cache.
         let mut event_loop = self.event_loop.lock().await;
-        let mut resolve_event = event_loop.find(|event| event.len != 0);
+        let mut resolve_event = event_loop.find(|event| event.actual != 0);
 
         // Poll it once to see if it's already ready.
         match future::poll_once(&mut resolve_event).await {
             Some(Some(new_events)) => {
                 // One is already available, we're done.
-                let len = new_events.len;
+                let len = new_events.actual;
                 events.0 = Some(new_events);
                 return Ok(len);
             }
@@ -207,7 +207,7 @@ impl Ring {
         // Wait for the event loop to return.
         match resolve_event.await {
             Some(new_events) => {
-                let len = new_events.len;
+                let len = new_events.actual;
                 events.0 = Some(new_events);
                 return Ok(len);
             }
@@ -551,12 +551,13 @@ impl Iterator for EventLoop {
             };
 
             // Run over the events we've received and see if there are any signals.
-            let mut notified = false;
+            let mut total_notifications = 0;
+
             for entry in self.events.entries(new_events) {
                 if entry.lpCompletionKey == WAKEUP_KEY {
                     // Don't notify if this is the only event.
-                    if new_events == 1 {
-                        notified = true;
+                    if new_events != 1 {
+                        total_notifications += 1;
                     }
                 } else if entry.lpCompletionKey == SHUTDOWN_KEY {
                     self.shutdown = true;
@@ -565,7 +566,8 @@ impl Iterator for EventLoop {
             }
 
             // If we're notified or if we have too many entries, return the buffer.
-            if notified || self.events.len >= self.events.buffer.len() {
+            if total_notifications > 0 || self.events.len >= self.events.buffer.len() {
+                self.events.actual = self.events.actual.saturating_sub(total_notifications);
                 let events = mem::replace(&mut self.events, InnerEvents::new());
 
                 return Some(events);
