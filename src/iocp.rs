@@ -227,7 +227,8 @@ impl Events {
                     let result = if overlapped.Internal as u32 == found::ERROR_SUCCESS {
                         Ok(overlapped.InternalHigh as _)
                     } else {
-                        Err(io::Error::from_raw_os_error(overlapped.Internal as _))
+                        cvt_res(overlapped.Internal as _)
+                            .map_err(|_| io::Error::from_raw_os_error(overlapped.Internal as _))
                     };
 
                     // Cast the OVERLAPPED point to an Operation to get our key.
@@ -375,11 +376,22 @@ impl OpType {
                 return Ok(None);
             }
 
-            Err(io::Error::last_os_error())
+            cvt_res(result).map(Some)
         } else {
             // Tell how many bytes were written.
             Ok(Some(out_bytes.assume_init() as isize))
         }
+    }
+}
+
+fn cvt_res(_result: found::BOOL) -> io::Result<isize> {
+    let error = unsafe { found::GetLastError() };
+
+    // If the error is ERROR_HANDLE_EOF, just return zero bytes.
+    if error == found::ERROR_HANDLE_EOF {
+        Ok(0)
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 
