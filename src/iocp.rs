@@ -14,6 +14,7 @@ use std::marker::PhantomPinned;
 use std::mem::{self, zeroed, ManuallyDrop, MaybeUninit};
 use std::os::windows::io::RawHandle;
 use std::pin::Pin;
+use std::ptr;
 
 use windows_sys::Win32::Foundation as found;
 use windows_sys::Win32::Storage::FileSystem as files;
@@ -106,7 +107,7 @@ impl Ring {
             return Err(io::Error::last_os_error());
         }
 
-        self.port.associate(result, 0x1337)?;
+        self.port.associate(result, 0)?;
 
         // TODO(notgull): Use strict provenance once it is stabilized.
         Ok(result as _)
@@ -270,6 +271,8 @@ struct InnerEvents {
     len: usize,
 
     /// The number of actual entries in the buffer.
+    ///
+    /// "Actual" entries are defined as non-wakeup or non-shutdown.
     actual: usize,
 }
 
@@ -285,15 +288,24 @@ impl InnerEvents {
         }
     }
 
+    /// List of actual valid entries.
+    fn valid(&self) -> &[wio::OVERLAPPED_ENTRY] {
+        unsafe {
+            std::slice::from_raw_parts(
+                self.buffer.as_ptr() as *const wio::OVERLAPPED_ENTRY,
+                self.len,
+            )
+        }
+    }
+
     fn open_space(&mut self) -> &mut [MaybeUninit<wio::OVERLAPPED_ENTRY>] {
         &mut self.buffer[self.len..]
     }
 
     /// Iterate over valid entries.
     fn entries(&self, tail: usize) -> impl Iterator<Item = &wio::OVERLAPPED_ENTRY> {
-        self.buffer[tail..self.len]
-            .iter()
-            .map(|e| unsafe { &*e.as_ptr() })
+        let start = self.len.saturating_sub(tail);
+        self.valid()[start..].iter()
     }
 }
 
@@ -369,26 +381,18 @@ impl OpType {
         buffer: *mut u8,
         len: u32,
     ) -> io::Result<Option<isize>> {
-        let mut out_bytes = MaybeUninit::uninit();
-
         let result = match self {
             OpType::Read => {
-                log::trace!("syscall: ReadFile");
-                files::ReadFile(
-                    handle,
-                    buffer.cast(),
-                    len,
-                    out_bytes.as_mut_ptr(),
-                    overlapped,
-                )
+                log::trace!("syscall: ReadFile, handle={:x}, buf={:p}, len={}, out_len=null, overlapped={:p}", handle, buffer, len, overlapped);
+                files::ReadFile(handle, buffer.cast(), len, ptr::null_mut(), overlapped)
             }
             OpType::Write => {
-                log::trace!("syscall: WriteFile");
+                log::trace!("syscall: WriteFile, handle={:x}, buf={:p}, len={}, out_len=null, overlapped={:p}", handle, buffer, len, overlapped);
                 files::WriteFile(
                     handle,
                     buffer.cast() as *const _,
                     len,
-                    out_bytes.as_mut_ptr(),
+                    ptr::null_mut(),
                     overlapped,
                 )
             }
@@ -404,7 +408,7 @@ impl OpType {
             cvt_res(result).map(Some)
         } else {
             // Tell how many bytes were written.
-            Ok(Some(out_bytes.assume_init() as isize))
+            todo!("check if this is correct")
         }
     }
 }
@@ -471,7 +475,6 @@ impl CompletionPort {
                 0,
             )
         };
-        log::trace!("EventLoop: finished wait for new status events");
 
         // Check if the call succeeded.
         if res == 0 {
@@ -552,22 +555,34 @@ impl Iterator for EventLoop {
                 }
             };
 
+            log::trace!(
+                "EventLoop: finished wait for new status events, new_events={}",
+                new_events
+            );
+
             // Run over the events we've received and see if there are any signals.
             let mut total_notifications = 0;
 
             for entry in self.events.entries(new_events) {
+                log::trace!("Entry Key: {}", entry.lpCompletionKey);
                 if entry.lpCompletionKey == WAKEUP_KEY {
                     // Don't notify if this is the only event.
-                    if new_events != 1 {
+                    log::trace!("EventLoop: received wakeup event");
+                    if self.events.actual != 1 {
                         total_notifications += 1;
                     }
                 } else if entry.lpCompletionKey == SHUTDOWN_KEY {
+                    log::trace!("EventLoop: received shutdown event");
                     self.shutdown = true;
                     return None;
                 }
             }
 
             // If we're notified or if we have too many entries, return the buffer.
+            log::trace!(
+                "EventLoop: found {} total notifications",
+                total_notifications
+            );
             if total_notifications > 0 || self.events.len >= self.events.buffer.len() {
                 self.events.actual = self.events.actual.saturating_sub(total_notifications);
                 let events = mem::replace(&mut self.events, InnerEvents::new());

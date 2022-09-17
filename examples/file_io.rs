@@ -1,8 +1,10 @@
 //! Brief example of cross-platform file I/O.
 
-use submission::{Operation, Ring};
+use submission::{Operation, Raw, Ring};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::init();
+
     async_io::block_on(async {
         // Create a new ring.
         let ring = Ring::new()?;
@@ -13,9 +15,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("Writing to file...");
 
+        let handle = Wrapper(ring.register(&file)?);
+
         // Create an operation to write to the file.
         let write_op =
-            unsafe { Operation::<'_, ()>::with_key(0).write(&file, b"Hello, world!", 0) };
+            unsafe { Operation::<'_, ()>::with_key(0).write(&handle, b"Hello, world!", 0) };
 
         // Submit the operation to the ring.
         pin_utils::pin_mut!(write_op);
@@ -44,8 +48,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("Reading from file...");
 
+        let handle = Wrapper(ring.register(&file)?);
+
         // Create an operation to read from the file.
-        let read_op = unsafe { Operation::<'_, ()>::with_key(1).read(&file, vec![0; 13], 0) };
+        let read_op = unsafe { Operation::<'_, ()>::with_key(1).read(&handle, vec![0; 13], 0) };
 
         // Submit the operation to the ring.
         pin_utils::pin_mut!(read_op);
@@ -78,4 +84,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Ok(())
     })
+}
+
+struct Wrapper(Raw);
+
+#[cfg(unix)]
+impl std::os::unix::io::AsRawFd for Wrapper {
+    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+        self.0
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsRawHandle for Wrapper {
+    fn as_raw_handle(&self) -> std::os::windows::io::RawHandle {
+        self.0
+    }
 }
