@@ -241,11 +241,12 @@ impl Events {
                     None
                 } else {
                     // Get the pointer to the overlapped structure.
+                    let bytes_total = entry.dwNumberOfBytesTransferred;
                     let overlapped = unsafe { &*(entry.lpOverlapped) };
 
                     // Get the result from the OVERLAPPED structure.
                     let result = if overlapped.Internal as u32 == found::ERROR_SUCCESS {
-                        Ok(overlapped.InternalHigh as _)
+                        Ok(bytes_total as _)
                     } else {
                         cvt_res(overlapped.Internal as _)
                             .map_err(|_| io::Error::from_raw_os_error(overlapped.Internal as _))
@@ -413,11 +414,11 @@ impl OpType {
     }
 }
 
-fn cvt_res(_result: found::BOOL) -> io::Result<isize> {
+fn cvt_res(result: found::BOOL) -> io::Result<isize> {
     let error = unsafe { found::GetLastError() };
 
     // If the error is ERROR_HANDLE_EOF, just return zero bytes.
-    if error == found::ERROR_HANDLE_EOF {
+    if error == found::ERROR_HANDLE_EOF || result == found::STATUS_END_OF_FILE as _ { 
         Ok(0)
     } else {
         Err(io::Error::last_os_error())
