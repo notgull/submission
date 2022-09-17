@@ -14,7 +14,6 @@ use std::marker::PhantomPinned;
 use std::mem::{self, zeroed, ManuallyDrop, MaybeUninit};
 use std::os::windows::io::RawHandle;
 use std::pin::Pin;
-use std::ptr;
 
 use windows_sys::Win32::Foundation as found;
 use windows_sys::Win32::Storage::FileSystem as files;
@@ -382,10 +381,12 @@ impl OpType {
         buffer: *mut u8,
         len: u32,
     ) -> io::Result<Option<isize>> {
+        let mut written_bytes = 0;
+
         let result = match self {
             OpType::Read => {
                 log::trace!("syscall: ReadFile, handle={:x}, buf={:p}, len={}, out_len=null, overlapped={:p}", handle, buffer, len, overlapped);
-                files::ReadFile(handle, buffer.cast(), len, ptr::null_mut(), overlapped)
+                files::ReadFile(handle, buffer.cast(), len, &mut written_bytes, overlapped)
             }
             OpType::Write => {
                 log::trace!("syscall: WriteFile, handle={:x}, buf={:p}, len={}, out_len=null, overlapped={:p}", handle, buffer, len, overlapped);
@@ -393,7 +394,7 @@ impl OpType {
                     handle,
                     buffer.cast() as *const _,
                     len,
-                    ptr::null_mut(),
+                    &mut written_bytes,
                     overlapped,
                 )
             }
@@ -408,8 +409,8 @@ impl OpType {
 
             cvt_res(result).map(Some)
         } else {
-            // Tell how many bytes were written.
-            todo!("check if this is correct")
+            // Tell how many bytes were written. This info is stored in the overlapped.
+            Ok(Some(written_bytes as _))
         }
     }
 }
@@ -418,7 +419,7 @@ fn cvt_res(result: found::BOOL) -> io::Result<isize> {
     let error = unsafe { found::GetLastError() };
 
     // If the error is ERROR_HANDLE_EOF, just return zero bytes.
-    if error == found::ERROR_HANDLE_EOF || result == found::STATUS_END_OF_FILE as _ { 
+    if error == found::ERROR_HANDLE_EOF || result == found::STATUS_END_OF_FILE as _ {
         Ok(0)
     } else {
         Err(io::Error::last_os_error())
