@@ -11,6 +11,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // There is not a cross-platform way to open a file, so just use the thread pool.
         let mut file = blocking::unblock(|| std::fs::File::create("foo.txt")).await?;
 
+        println!("Writing to file...");
+
         // Create an operation to write to the file.
         let write_op =
             unsafe { Operation::<'_, ()>::with_key(0).write(&file, b"Hello, world!", 0) };
@@ -39,6 +41,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Close the file and reopen it.
         drop(file);
         file = blocking::unblock(|| std::fs::File::open("foo.txt")).await?;
+
+        println!("Reading from file...");
 
         // Create an operation to read from the file.
         let read_op = unsafe { Operation::<'_, ()>::with_key(1).read(&file, vec![0; 13], 0) };

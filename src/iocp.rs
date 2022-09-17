@@ -448,6 +448,7 @@ impl CompletionPort {
         if handle == 0 {
             Err(io::Error::last_os_error())
         } else {
+            debug_assert_eq!(handle, self.0);
             Ok(())
         }
     }
