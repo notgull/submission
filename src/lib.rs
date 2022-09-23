@@ -21,16 +21,13 @@
 
 #![deny(rust_2018_idioms, future_incompatible)]
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::{CStr, CString};
 use std::fmt;
 use std::io;
 use std::marker::PhantomPinned;
-use std::path::{Path, PathBuf};
+use std::ops::{Range, RangeBounds, Bound};
 use std::pin::Pin;
 use std::ptr::NonNull;
-
-#[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
 
 use async_lock::Mutex;
 
@@ -531,145 +528,44 @@ unsafe impl AsyncParameter for Box<[u8]> {
         0
     }
 }
-unsafe impl AsyncParameter for &'static OsStr {
+unsafe impl AsyncParameter for &'static CStr {
     fn ptr(&self) -> Option<NonNull<u8>> {
-        #[cfg(unix)]
-        return self.as_bytes().first().map(NonNull::from);
-
-        // SAFETY: just cast the pointer to a u8 pointer.
-        #[cfg(windows)]
-        return unsafe { Some(NonNull::new_unchecked(*self as *const _ as *mut u8)) };
+        self.to_bytes_with_nul().first().map(NonNull::from)
     }
-
+    fn len(&self) -> usize {
+        self.to_bytes_with_nul().len()
+    }
     fn ptr2(&self) -> Option<NonNull<u8>> {
         None
     }
-
-    fn len(&self) -> usize {
-        OsStr::len(self)
-    }
-
     fn len2(&self) -> usize {
         0
     }
 }
-unsafe impl AsyncParameter for OsString {
+unsafe impl AsyncParameter for CString {
     fn ptr(&self) -> Option<NonNull<u8>> {
-        #[cfg(unix)]
-        return self.as_bytes().first().map(NonNull::from);
-
-        // SAFETY: just cast the pointer to a u8 pointer.
-        #[cfg(windows)]
-        return unsafe {
-            Some(NonNull::new_unchecked(
-                self.as_os_str() as *const OsStr as *const u8 as *mut u8,
-            ))
-        };
+        self.to_bytes_with_nul().first().map(NonNull::from)
     }
-
+    fn len(&self) -> usize {
+        self.to_bytes_with_nul().len()
+    }
     fn ptr2(&self) -> Option<NonNull<u8>> {
         None
     }
-
-    fn len(&self) -> usize {
-        <OsStr>::len(self)
-    }
-
     fn len2(&self) -> usize {
         0
     }
 }
-unsafe impl AsyncParameter for Box<OsStr> {
+unsafe impl AsyncParameter for Box<CStr> {
     fn ptr(&self) -> Option<NonNull<u8>> {
-        #[cfg(unix)]
-        return self.as_bytes().first().map(NonNull::from);
-
-        // SAFETY: just cast the pointer to a u8 pointer.
-        #[cfg(windows)]
-        return unsafe {
-            Some(NonNull::new_unchecked(
-                (&**self) as *const OsStr as *const u8 as *mut u8,
-            ))
-        };
+        self.to_bytes_with_nul().first().map(NonNull::from)
     }
-
+    fn len(&self) -> usize {
+        self.to_bytes_with_nul().len()
+    }
     fn ptr2(&self) -> Option<NonNull<u8>> {
         None
     }
-
-    fn len(&self) -> usize {
-        OsStr::len(self)
-    }
-
-    fn len2(&self) -> usize {
-        0
-    }
-}
-unsafe impl AsyncParameter for &'static Path {
-    fn ptr(&self) -> Option<NonNull<u8>> {
-        self.as_os_str().ptr()
-    }
-
-    fn len(&self) -> usize {
-        self.as_os_str().len()
-    }
-
-    fn ptr2(&self) -> Option<NonNull<u8>> {
-        None
-    }
-
-    fn len2(&self) -> usize {
-        0
-    }
-}
-unsafe impl AsyncParameter for PathBuf {
-    fn ptr(&self) -> Option<NonNull<u8>> {
-        #[cfg(unix)]
-        return self.as_os_str().as_bytes().first().map(NonNull::from);
-
-        // SAFETY: just cast the pointer to a u8 pointer.
-        #[cfg(windows)]
-        return unsafe {
-            Some(NonNull::new_unchecked(
-                self.as_os_str() as *const OsStr as *const u8 as *mut u8,
-            ))
-        };
-    }
-
-    fn len(&self) -> usize {
-        self.as_os_str().len()
-    }
-
-    fn ptr2(&self) -> Option<NonNull<u8>> {
-        None
-    }
-
-    fn len2(&self) -> usize {
-        0
-    }
-}
-unsafe impl AsyncParameter for Box<Path> {
-    fn ptr(&self) -> Option<NonNull<u8>> {
-        #[cfg(unix)]
-        return self.as_os_str().as_bytes().first().map(NonNull::from);
-
-        // SAFETY: just cast the pointer to a u8 pointer.
-        #[cfg(windows)]
-        return unsafe {
-            Some(NonNull::new_unchecked(
-                self.as_os_str() as *const OsStr as *const u8 as *mut u8,
-            ))
-        };
-    }
-
-    fn len(&self) -> usize {
-        self.as_os_str().len()
-    }
-
-    fn ptr2(&self) -> Option<NonNull<u8>> {
-        None
-    }
-
     fn len2(&self) -> usize {
         0
     }
@@ -725,6 +621,73 @@ unsafe impl<const N: usize> BufMut for [u8; N] {}
 unsafe impl BufMut for &'static mut [u8] {}
 unsafe impl BufMut for Vec<u8> {}
 unsafe impl BufMut for Box<[u8]> {}
+
+/// A buffer that represents a Unix path.
+/// 
+/// # Safety
+/// 
+/// `ptr` must be a pointer to an Unix-specific path string that ends in a zero.
+/// `None` is not allowed.
+/// 
+/// The remaining methods are the same as [`Buf`].
+pub unsafe trait UnixPathBuf: AsyncParameter {}
+
+unsafe impl UnixPathBuf for &'static CStr {}
+unsafe impl UnixPathBuf for CString {}
+unsafe impl UnixPathBuf for Box<CStr> {}
+
+/// A slice of a buffer.
+/// 
+/// This can be used if you only want to pass a portion of an owned buffer
+/// to a system call.
+pub struct Slice<B: ?Sized> {
+    slice: Range<usize>,
+    buf: B,
+}
+
+impl<B: Buf> Slice<B> {
+    /// Create a new slice of a buffer.
+    pub fn new(
+        buf: B,
+        bounds: impl RangeBounds<usize>,
+    ) -> Self {
+        let start = match bounds.start_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n + 1,
+            Bound::Unbounded => 0,
+        };
+        
+        let end = match bounds.end_bound() {
+            Bound::Included(&n) => n + 1,
+            Bound::Excluded(&n) => n,
+            Bound::Unbounded => buf.len(),
+        };
+
+        Self {
+            slice: start..end,
+            buf,
+        }
+    }
+}
+
+unsafe impl<B: Buf> AsyncParameter for Slice<B> {
+    fn ptr(&self) -> Option<NonNull<u8>> {
+        self.buf.ptr().and_then(|ptr| unsafe {
+            NonNull::new(ptr.as_ptr().add(self.slice.start))
+        })
+    }
+    fn len(&self) -> usize {
+        self.slice.end - self.slice.start
+    }
+    fn ptr2(&self) -> Option<NonNull<u8>> {
+        None
+    }
+    fn len2(&self) -> usize {
+        0
+    }
+}
+unsafe impl<B: Buf> Buf for Slice<B> {}
+unsafe impl<B: BufMut> BufMut for Slice<B> {}
 
 cfg_if::cfg_if! {
     if #[cfg(unix)] {

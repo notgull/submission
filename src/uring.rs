@@ -353,6 +353,11 @@ impl Drop for EventFd {
     }
 }
 
+/// Linux-specific exceptions to the [`Operation`] structure.
+pub mod linux {
+
+}
+
 struct CallOnDrop<F: Fn()>(F);
 
 impl<F: Fn()> Drop for CallOnDrop<F> {
