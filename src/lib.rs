@@ -670,6 +670,18 @@ impl<B: Buf> Slice<B> {
     }
 }
 
+impl<B: AsRef<[u8]>> AsRef<[u8]> for Slice<B> {
+    fn as_ref(&self) -> &[u8] {
+        &self.buf.as_ref()[self.slice.clone()]
+    }
+}
+
+impl<B: AsMut<[u8]>> AsMut<[u8]> for Slice<B> {
+    fn as_mut(&mut self) -> &mut [u8] {
+        &mut self.buf.as_mut()[self.slice.clone()]
+    }
+}
+
 unsafe impl<B: Buf> AsyncParameter for Slice<B> {
     fn ptr(&self) -> Option<NonNull<u8>> {
         self.buf.ptr().and_then(|ptr| unsafe {
